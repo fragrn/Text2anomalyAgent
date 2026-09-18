@@ -15,6 +15,25 @@ from .incident import (
     merge_evidence,
     merge_incident_specs,
 )
+from .action import (
+    ActionBase,
+    ActionResult,
+    ActionResultStatus,
+    BenchBaseAction,
+    ChaosBladeAction,
+    SQLAction,
+    TransactionAction,
+    TransactionActor,
+    TransactionStep,
+)
+from .evidence import (
+    EvidenceAggregation,
+    EvidenceOperator,
+    EvidenceReference,
+    EvidenceResult,
+    EvidenceRule,
+    EvidenceStatus,
+)
 
 __all__ = [
     "ExperimentId",
@@ -28,4 +47,19 @@ __all__ = [
     "MissingInformation",
     "merge_evidence",
     "merge_incident_specs",
+    "ActionBase",
+    "ActionResult",
+    "ActionResultStatus",
+    "BenchBaseAction",
+    "ChaosBladeAction",
+    "SQLAction",
+    "TransactionAction",
+    "TransactionActor",
+    "TransactionStep",
+    "EvidenceAggregation",
+    "EvidenceOperator",
+    "EvidenceReference",
+    "EvidenceResult",
+    "EvidenceRule",
+    "EvidenceStatus",
 ]

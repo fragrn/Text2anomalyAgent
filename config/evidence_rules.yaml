@@ -1,0 +1,31 @@
+qps_drop:
+  metric: qps
+  aggregation: ratio
+  reference: baseline
+  operator: lt
+  threshold: 0.7
+  min_consecutive_samples: 1
+
+slow_query:
+  metric: new_slow_log_entries
+  aggregation: count
+  reference: window_start
+  operator: gte
+  threshold: 1
+  min_consecutive_samples: 1
+
+lock_contention:
+  metric: lock_waits
+  aggregation: delta
+  reference: window_start
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+
+connections_up:
+  metric: threads_connected
+  aggregation: ratio
+  reference: baseline
+  operator: gt
+  threshold: 1.2
+  min_consecutive_samples: 1

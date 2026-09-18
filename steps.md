@@ -361,7 +361,7 @@ UPDATE accounts SET balance = balance + 999999999999 WHERE id = 1;
 
 现在开始定义"Agent 最终能让系统执行什么"。
 
-这一设计里 Agent **不输出 Intent**，而是直接输出最终
+这一设计里 Agent 输出最终
 SQL、事务脚本、BenchBase 参数或 ChaosBlade 命令。因此必须先把 Executor
 协议固定下来，之后 Agent 只需要生成符合这个协议的对象。
 
@@ -540,7 +540,7 @@ metrics/
 ├── collector.py
 ├── sampler.py
 ├── mysql_metrics.py
-├── prometheus.py
+├── system_metrics.py
 ├── slow_log.py
 └── timeline.py
 ```
@@ -684,6 +684,102 @@ injection QPS = 70
 相同 Timeline 永远得到相同结果；Evidence Engine 不调用 LLM。
 
 ------------------------------------------------------------------------
+
+新 M7：Experiment State Machine
+
+放置位置：当前 M6「Evidence Engine」和 M7「Direct Reproduction」之间。
+
+这一步是在做什么
+
+建立统一实验状态机，明确一次异常复现实验当前处于哪个阶段，以及允许进入哪个下一阶段。
+
+状态机只管理实验生命周期，不负责生成 SQL、执行 SQL 或判断异常。
+
+第一版状态：
+
+CREATED
+  ↓
+PREPARING
+  ↓
+WORKLOAD_STARTING
+  ↓
+WARMUP
+  ↓
+BASELINE
+  ↓
+INJECTING
+  ↓
+OBSERVING
+  ↓
+RECOVERING
+  ↓
+EVALUATING
+  ↓
+CLEANING_UP
+  ↓
+SUCCESS
+
+执行错误允许进入：
+
+任意运行状态
+    ↓
+FAILED
+    ↓
+CLEANING_UP
+
+创建：
+
+models/experiment_state.py
+runtime/state_machine.py
+
+定义：
+
+ExperimentPhase
+ExperimentState
+StateTransition
+InvalidStateTransition
+
+所有状态切换必须经过 StateMachine，Runner 不能自己随意修改当前 phase。
+
+如何测试
+
+不运行真实异常，只测试状态转换。
+
+验证合法转换：
+
+CREATED → PREPARING                 PASS
+WARMUP → BASELINE                   PASS
+INJECTING → OBSERVING               PASS
+EVALUATING → CLEANING_UP            PASS
+
+验证非法转换：
+
+CREATED → INJECTING                 REJECT
+BASELINE → SUCCESS                  REJECT
+SUCCESS → INJECTING                 REJECT
+
+再模拟一次执行失败：
+
+BASELINE
+→ INJECTING
+→ Executor Error
+→ FAILED
+→ CLEANING_UP
+
+检查失败后不会继续进入正常 EVALUATING。
+
+如何验收
+
+能够保证：
+
+任意时刻只有一个明确的 ExperimentPhase。
+所有 phase 转换都经过 State Machine。
+非法状态转换会被拒绝。
+执行失败能够进入 FAILED 和 Cleanup。
+State Machine 不包含 LLM、SQL 生成、Metrics 和 Evidence 判断逻辑。
+
+通过后，原 M7 Direct Reproduction 顺延为 M8，并让 direct_runner.py 使用这个状态机管理原来已经定义的 prepare → baseline → execute → observe → recover → evaluate → cleanup。
+
 
 # M7：Direct Reproduction 最小闭环------先不用 Agent
 
@@ -1087,6 +1183,56 @@ Attempt 1
 
 ------------------------------------------------------------------------
 
+Reflection 不需要再单独增加一个“状态机开发步骤”
+
+到了你现在的 M11 Reflection，只需要扩展已有 State Machine。
+
+原文已经规定 Reflection 是“失败结果 → Agent 调整 → 下一轮重新生成 ActionPlan”。
+
+此时增加：
+
+EVALUATING
+   │
+   ├── HIT
+   │    ↓
+   │  CLEANING_UP → SUCCESS
+   │
+   └── MISS
+        ↓
+     REFLECTING
+        ↓
+     PLANNING
+        ↓
+     VALIDATING
+        ↓
+     INJECTING
+
+测试 max_attempts=2：
+
+Attempt 1
+INJECTING
+→ EVALUATING
+→ MISS
+→ REFLECTING
+
+Attempt 2
+→ PLANNING
+→ VALIDATING
+→ INJECTING
+→ EVALUATING
+→ HIT
+→ SUCCESS
+
+验收重点是：
+
+MISS 和 SYSTEM_ERROR 走不同路径。
+Reflection 后 attempt += 1。
+新 Action 必须重新经过 Validation/Safety。
+达到 max_attempts 后不能无限循环。
+
+这部分直接写进现有 Reflection M 即可，不需要再增加新的 M。
+
+
 # M12：Propagation-only Gate
 
 ## 这一步是在做什么
@@ -1215,6 +1361,89 @@ Missing
 同时 JSON 中保留详细结构和 provenance。
 
 ------------------------------------------------------------------------
+
+新 M15：State Checkpoint、Pause 与 Resume
+
+放置位置：当前 M13「DBA Post Incident Analyzer」之后、当前 M14「Information Sufficiency + Information HITL」之前。
+
+如果前面插入新 M7 后重新编号，对应的新编号会整体变化；这里按你当前文档的模块名称定位最清楚。
+
+这一步是在做什么
+
+前面的 State Machine 解决“实验现在处于什么状态”，这一步解决：
+
+状态能不能保存下来，并在程序退出、HITL 暂停后继续执行。
+
+这是 Information HITL 的前置能力，因为你当前设计明确要求：
+
+python main.py resume EXP001
+
+能够跨进程继续实验。
+
+创建：
+
+runtime/
+├── checkpoint.py
+└── orchestrator.py
+
+每次状态变化保存：
+
+experiment_state.json
+phase_history.jsonl
+
+支持：
+
+save_state()
+load_state()
+pause()
+resume()
+
+后续 HITL 只负责产生“需要人工输入”的事件，不自己实现状态持久化。
+
+如何测试
+
+先不接真正 HITL。
+
+人工运行到：
+
+CREATED
+→ PREPARING
+→ CHECKING_INFORMATION
+→ PAUSED
+
+保存 Checkpoint，然后模拟程序退出。
+
+重新启动：
+
+python main.py resume EXP001
+
+验证能够加载：
+
+experiment_id
+current_phase
+previous_phase
+attempt
+pause_reason
+
+再提供模拟 Human Response，验证：
+
+PAUSED
+→ resume
+→ CHECKING_INFORMATION
+→ next phase
+
+同时检查 phase_history.jsonl 是否记录完整。
+
+如何验收
+
+能够做到：
+
+每次关键状态变化都保存 Checkpoint。
+程序退出后能够读取最后一个稳定状态。
+PAUSED 状态下不继续运行实验。
+resume 不会从头重新执行已经完成的阶段。
+phase_history.jsonl 能还原完整状态变化。
+后续 Information HITL 和 Strategy HITL 可以直接复用 Pause/Resume。
 
 # M14：Information Sufficiency + Information HITL
 
