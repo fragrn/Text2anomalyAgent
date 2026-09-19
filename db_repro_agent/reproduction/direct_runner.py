@@ -11,7 +11,7 @@ from ..evaluation.incident_evaluator import IncidentEvaluation, IncidentEvaluato
 from ..execution.dispatcher import ActionDispatcher
 from ..metrics.sampler import MetricsSampler
 from ..metrics.timeline import ExperimentPhase, ExperimentTimeline
-from ..models.action import ActionBase, ActionResult
+from ..models.action import ActionBase, ActionResult, BenchBaseAction
 from ..models.common import ResultStatus
 from ..models.experiment_state import ExperimentPhase as StatePhase
 from ..models.experiment_state import ExperimentState
@@ -23,6 +23,7 @@ class DirectReproductionRequest(BaseModel):
 
     incident_id: str = Field(min_length=1)
     action: ActionBase
+    background_workload: BenchBaseAction | None = None
     oracle_rule_id: str = Field(min_length=1)
     baseline_seconds: float = Field(default=1.0, ge=0)
     observe_seconds: float = Field(default=1.0, ge=0)
@@ -36,6 +37,7 @@ class DirectRunResult(BaseModel):
     status: ResultStatus
     state: ExperimentState
     action_result: ActionResult | None = None
+    background_workload_result: ActionResult | None = None
     evaluation: IncidentEvaluation | None = None
     timeline: Any
 
@@ -72,13 +74,35 @@ class DirectRunner:
         timeline = ExperimentTimeline()
         state = ExperimentState(experiment_id=request.incident_id, mode="direct", action=request.action.model_dump(mode="json"))
         action_result: ActionResult | None = None
+        background_workload_result: ActionResult | None = None
+        background_workload_started = False
         evaluation: IncidentEvaluation | None = None
 
         def preparing(current: ExperimentState):
             return {"status": "prepared"}
 
         def workload_starting(current: ExperimentState):
-            return {"status": "workload_not_required_for_m7"}
+            nonlocal background_workload_result, background_workload_started
+            workload = request.background_workload
+            if workload is None:
+                return {"status": "no_background_workload"}
+            if workload.benchmark.lower() not in {"tpcc", "tpch"}:
+                raise ValueError("M7 background workload must use the TPCC or TPCH BenchBase benchmark")
+
+            background_workload_result = self.dispatcher.benchbase.start(workload)
+            background_workload_started = background_workload_result.success
+            if not background_workload_result.success:
+                raise ExecutionFailure(background_workload_result)
+            timeline.mark(
+                ExperimentPhase.WARMUP,
+                name="background_workload_started",
+                metadata={"benchmark": workload.benchmark, "action_id": workload.action_id},
+            )
+            return {
+                "status": "background_started",
+                "benchmark": workload.benchmark,
+                "result": background_workload_result.model_dump(mode="json"),
+            }
 
         def warmup(current: ExperimentState):
             self.sampler.start(timeline, phase=ExperimentPhase.WARMUP)
@@ -141,7 +165,13 @@ class DirectRunner:
         def cleanup(current: ExperimentState):
             self.sampler.stop()
             self.dispatcher.cleanup(request.action)
-            return {"cleaned": True}
+            workload = request.background_workload
+            if workload is not None and background_workload_started:
+                self.dispatcher.benchbase.cleanup(workload)
+            return {
+                "cleaned": True,
+                "background_workload_cleaned": workload is not None and background_workload_started,
+            }
 
         handlers = {
             StatePhase.PREPARING: preparing,
@@ -162,7 +192,9 @@ class DirectRunner:
         if action_result is not None:
             final_state = final_state.model_copy(update={"execution_result": action_result.model_dump(mode="json")})
 
-        if action_result is not None and not action_result.success:
+        if background_workload_result is not None and not background_workload_result.success:
+            status = ResultStatus.SYSTEM_ERROR
+        elif action_result is not None and not action_result.success:
             status = ResultStatus.SYSTEM_ERROR
         elif evaluation is not None and not evaluation.hit:
             status = ResultStatus.EXPERIMENT_MISS
@@ -175,6 +207,7 @@ class DirectRunner:
             status=status,
             state=final_state,
             action_result=action_result,
+            background_workload_result=background_workload_result,
             evaluation=evaluation,
             timeline=timeline,
         )
