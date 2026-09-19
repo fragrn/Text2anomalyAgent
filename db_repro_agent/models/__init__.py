@@ -34,6 +34,7 @@ from .evidence import (
     EvidenceRule,
     EvidenceStatus,
 )
+from .experiment_state import ExperimentPhase, ExperimentState, StateTransition
 
 __all__ = [
     "ExperimentId",
@@ -62,4 +63,7 @@ __all__ = [
     "EvidenceResult",
     "EvidenceRule",
     "EvidenceStatus",
+    "ExperimentPhase",
+    "ExperimentState",
+    "StateTransition",
 ]

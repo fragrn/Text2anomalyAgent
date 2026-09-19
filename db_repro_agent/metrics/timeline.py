@@ -15,6 +15,7 @@ class ExperimentPhase(StrEnum):
     WARMUP = "warmup"
     BASELINE = "baseline"
     INJECTION = "injection"
+    OBSERVING = "observing"
     RECOVERY = "recovery"
     STOPPED = "stopped"
 

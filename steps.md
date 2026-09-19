@@ -62,6 +62,44 @@ HITL 耦合进来。**
 
 ------------------------------------------------------------------------
 
+
+新增步骤之后：
+M0～M6
+   ↓
+【新增 1】
+基础 Experiment State Machine
+   ↓
+M7 Direct Reproduction
+   ↓
+M8 AnomalyGraph
+   ↓
+【新增 2】
+Propagation State Extension
+   ↓
+M9 Propagation Reproduction
+   ↓
+M10 Agent Action Generation
+   ↓
+M11 Reflection
+   └── 在已有状态机增加 REFLECTING / RETRY
+   ↓
+M12 Propagation-only Gate
+   ↓
+M13 DBA Post Incident Analyzer
+   ↓
+【新增 3】
+Checkpoint / Pause / Resume
+   ↓
+M14 Information HITL
+   ↓
+M15 Strategy Selection
+   ↓
+M16 Strategy HITL
+   ↓
+...
+
+
+
 # M0：建立工程骨架、配置系统和统一 Artifact
 
 ## 这一步是在做什么
@@ -685,101 +723,6 @@ injection QPS = 70
 
 ------------------------------------------------------------------------
 
-新 M7：Experiment State Machine
-
-放置位置：当前 M6「Evidence Engine」和 M7「Direct Reproduction」之间。
-
-这一步是在做什么
-
-建立统一实验状态机，明确一次异常复现实验当前处于哪个阶段，以及允许进入哪个下一阶段。
-
-状态机只管理实验生命周期，不负责生成 SQL、执行 SQL 或判断异常。
-
-第一版状态：
-
-CREATED
-  ↓
-PREPARING
-  ↓
-WORKLOAD_STARTING
-  ↓
-WARMUP
-  ↓
-BASELINE
-  ↓
-INJECTING
-  ↓
-OBSERVING
-  ↓
-RECOVERING
-  ↓
-EVALUATING
-  ↓
-CLEANING_UP
-  ↓
-SUCCESS
-
-执行错误允许进入：
-
-任意运行状态
-    ↓
-FAILED
-    ↓
-CLEANING_UP
-
-创建：
-
-models/experiment_state.py
-runtime/state_machine.py
-
-定义：
-
-ExperimentPhase
-ExperimentState
-StateTransition
-InvalidStateTransition
-
-所有状态切换必须经过 StateMachine，Runner 不能自己随意修改当前 phase。
-
-如何测试
-
-不运行真实异常，只测试状态转换。
-
-验证合法转换：
-
-CREATED → PREPARING                 PASS
-WARMUP → BASELINE                   PASS
-INJECTING → OBSERVING               PASS
-EVALUATING → CLEANING_UP            PASS
-
-验证非法转换：
-
-CREATED → INJECTING                 REJECT
-BASELINE → SUCCESS                  REJECT
-SUCCESS → INJECTING                 REJECT
-
-再模拟一次执行失败：
-
-BASELINE
-→ INJECTING
-→ Executor Error
-→ FAILED
-→ CLEANING_UP
-
-检查失败后不会继续进入正常 EVALUATING。
-
-如何验收
-
-能够保证：
-
-任意时刻只有一个明确的 ExperimentPhase。
-所有 phase 转换都经过 State Machine。
-非法状态转换会被拒绝。
-执行失败能够进入 FAILED 和 Cleanup。
-State Machine 不包含 LLM、SQL 生成、Metrics 和 Evidence 判断逻辑。
-
-通过后，原 M7 Direct Reproduction 顺延为 M8，并让 direct_runner.py 使用这个状态机管理原来已经定义的 prepare → baseline → execute → observe → recover → evaluate → cleanup。
-
 
 # M7：Direct Reproduction 最小闭环------先不用 Agent
 
@@ -1183,54 +1126,7 @@ Attempt 1
 
 ------------------------------------------------------------------------
 
-Reflection 不需要再单独增加一个“状态机开发步骤”
 
-到了你现在的 M11 Reflection，只需要扩展已有 State Machine。
-
-原文已经规定 Reflection 是“失败结果 → Agent 调整 → 下一轮重新生成 ActionPlan”。
-
-此时增加：
-
-EVALUATING
-   │
-   ├── HIT
-   │    ↓
-   │  CLEANING_UP → SUCCESS
-   │
-   └── MISS
-        ↓
-     REFLECTING
-        ↓
-     PLANNING
-        ↓
-     VALIDATING
-        ↓
-     INJECTING
-
-测试 max_attempts=2：
-
-Attempt 1
-INJECTING
-→ EVALUATING
-→ MISS
-→ REFLECTING
-
-Attempt 2
-→ PLANNING
-→ VALIDATING
-→ INJECTING
-→ EVALUATING
-→ HIT
-→ SUCCESS
-
-验收重点是：
-
-MISS 和 SYSTEM_ERROR 走不同路径。
-Reflection 后 attempt += 1。
-新 Action 必须重新经过 Validation/Safety。
-达到 max_attempts 后不能无限循环。
-
-这部分直接写进现有 Reflection M 即可，不需要再增加新的 M。
 
 
 # M12：Propagation-only Gate
