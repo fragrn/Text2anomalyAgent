@@ -13,6 +13,7 @@ from ..metrics.sampler import MetricsSampler
 from ..metrics.timeline import ExperimentPhase, ExperimentTimeline
 from ..models.action import ActionBase, ActionResult, BenchBaseAction
 from ..models.common import ResultStatus
+from ..models.evidence import EvidenceSnapshot, EvidenceSnapshotPair, SnapshotBoundary
 from ..models.experiment_state import ExperimentPhase as StatePhase
 from ..models.experiment_state import ExperimentState
 from ..runtime.orchestrator import Orchestrator
@@ -28,6 +29,8 @@ class DirectReproductionRequest(BaseModel):
     baseline_seconds: float = Field(default=1.0, ge=0)
     observe_seconds: float = Field(default=1.0, ge=0)
     recovery_seconds: float = Field(default=0.0, ge=0)
+    severity_rule_id: str | None = None
+    supporting_rule_ids: list[str] = Field(default_factory=list)
 
 
 class DirectRunResult(BaseModel):
@@ -40,6 +43,8 @@ class DirectRunResult(BaseModel):
     background_workload_result: ActionResult | None = None
     evaluation: IncidentEvaluation | None = None
     timeline: Any
+    pre_snapshot: EvidenceSnapshot | None = None
+    post_snapshot: EvidenceSnapshot | None = None
 
 
 class ExecutionFailure(RuntimeError):
@@ -77,6 +82,8 @@ class DirectRunner:
         background_workload_result: ActionResult | None = None
         background_workload_started = False
         evaluation: IncidentEvaluation | None = None
+        pre_snapshot: EvidenceSnapshot | None = None
+        post_snapshot: EvidenceSnapshot | None = None
 
         def preparing(current: ExperimentState):
             return {"status": "prepared"}
@@ -123,6 +130,8 @@ class DirectRunner:
             return {"validated": True}
 
         def injecting(current: ExperimentState):
+            nonlocal pre_snapshot
+            pre_snapshot = self.sampler.capture_snapshot(SnapshotBoundary.PRE_INJECTION)
             timeline.mark(ExperimentPhase.INJECTION, name="injection_start", metadata={"action_id": request.action.action_id})
             self.sampler.set_phase(ExperimentPhase.INJECTION, name="injection_start", metadata={"action_id": request.action.action_id})
             started = self.dispatcher.start(request.action)
@@ -133,9 +142,11 @@ class DirectRunner:
             return started.model_dump(mode="json")
 
         def observing(current: ExperimentState):
-            nonlocal action_result
+            nonlocal action_result, post_snapshot
             self.sampler.set_phase(ExperimentPhase.OBSERVING, name="observation_start")
             action_result = self.dispatcher.execute(request.action)
+            timeline.add_sample("action_duration_ms", action_result.duration_ms, phase=ExperimentPhase.OBSERVING)
+            post_snapshot = self.sampler.capture_snapshot(SnapshotBoundary.POST_ACTION)
             if not action_result.success:
                 raise ExecutionFailure(action_result)
             if request.observe_seconds:
@@ -157,6 +168,11 @@ class DirectRunner:
                 timeline=timeline,
                 phase=ExperimentPhase.OBSERVING,
                 baseline_phase=ExperimentPhase.BASELINE,
+                snapshots=EvidenceSnapshotPair(pre_injection=pre_snapshot, post_action=post_snapshot)
+                if pre_snapshot is not None and post_snapshot is not None
+                else None,
+                severity_rule_id=request.severity_rule_id,
+                supporting_rule_ids=request.supporting_rule_ids,
             )
             if not evaluation.hit:
                 raise ExperimentMiss(evaluation)
@@ -210,4 +226,6 @@ class DirectRunner:
             background_workload_result=background_workload_result,
             evaluation=evaluation,
             timeline=timeline,
+            pre_snapshot=pre_snapshot,
+            post_snapshot=post_snapshot,
         )

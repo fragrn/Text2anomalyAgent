@@ -8,7 +8,13 @@ from pathlib import Path
 from db_repro_agent.evaluation.evidence_engine import EvidenceEngine
 from db_repro_agent.graph.evidence_registry import EvidenceRuleRegistry
 from db_repro_agent.metrics.timeline import ExperimentPhase, ExperimentTimeline
-from db_repro_agent.models.evidence import EvidenceRule, EvidenceStatus
+from db_repro_agent.models.evidence import (
+    EvidenceRule,
+    EvidenceSnapshot,
+    EvidenceSnapshotPair,
+    EvidenceStatus,
+    SnapshotBoundary,
+)
 
 
 def timeline_with_qps(injection_value: float, *, baseline_value: float = 100.0) -> ExperimentTimeline:
@@ -26,7 +32,12 @@ def test_registry_loads_deterministic_yaml_rules() -> None:
     qps_rule = registry.get("qps_drop")
     assert qps_rule.metric == "qps"
     assert qps_rule.threshold == 0.7
-    assert registry.get("slow_query").aggregation == "count"
+    assert registry.get("slow_query").aggregation == "delta"
+    assert registry.get("slow_query").source == "snapshot"
+    assert registry.get("lock_contention").metric == "lock_waits"
+    assert registry.get("lock_contention_severe").metric == "lock_wait_time_ms"
+    assert registry.get("lock_contention_severe").threshold == 1000
+    assert registry.get("active_lock_wait").metric == "lock_waits_current"
 
 
 def test_qps_ratio_69_percent_is_hit() -> None:
@@ -78,6 +89,61 @@ def test_count_delta_and_p95_rules() -> None:
     latency = engine.evaluate_rule("latency", timeline)
     assert latency.hit is True
     assert latency.aggregate_value == 110
+
+
+def test_lock_wait_count_and_wait_time_severity_rules() -> None:
+    registry = EvidenceRuleRegistry.from_yaml("config/evidence_rules.yaml")
+    timeline = ExperimentTimeline()
+    timeline.mark(ExperimentPhase.INJECTION, name="injection_start")
+    for waits, wait_time_ms in [(10, 200), (11, 1500), (14, 2500)]:
+        timeline.add_sample("lock_waits", waits, phase=ExperimentPhase.INJECTION)
+        timeline.add_sample("lock_wait_time_ms", wait_time_ms, phase=ExperimentPhase.INJECTION)
+
+    engine = EvidenceEngine(registry)
+    contention = engine.evaluate_rule("lock_contention", timeline)
+    severe = engine.evaluate_rule("lock_contention_severe", timeline)
+
+    assert contention.hit is True
+    assert severe.hit is True
+    assert severe.comparison_value > 1000
+
+
+def test_snapshot_lock_wait_delta_and_severity_boundaries() -> None:
+    engine = EvidenceEngine(EvidenceRuleRegistry.from_yaml("config/evidence_rules.yaml"))
+    pre = EvidenceSnapshot(
+        boundary=SnapshotBoundary.PRE_INJECTION,
+        metrics={"lock_waits": 100.0, "lock_wait_time_ms": 3000.0},
+    )
+    post = EvidenceSnapshot(
+        boundary=SnapshotBoundary.POST_ACTION,
+        metrics={"lock_waits": 102.0, "lock_wait_time_ms": 4000.0},
+    )
+    pair = EvidenceSnapshotPair(pre_injection=pre, post_action=post)
+
+    contention = engine.evaluate_snapshot_rule("lock_contention", pair)
+    severe = engine.evaluate_snapshot_rule("lock_contention_severe", pair)
+
+    assert contention.hit is True
+    assert contention.comparison_value == 2.0
+    assert severe.hit is True
+    assert severe.comparison_value == 1000.0
+
+    no_new_wait = pair.model_copy(update={
+        "post_action": post.model_copy(update={"metrics": {"lock_waits": 100.0, "lock_wait_time_ms": 3999.0}})
+    })
+    assert engine.evaluate_snapshot_rule("lock_contention", no_new_wait).hit is False
+    assert engine.evaluate_snapshot_rule("lock_contention_severe", no_new_wait).hit is False
+
+
+def test_snapshot_missing_metric_is_not_a_hit() -> None:
+    engine = EvidenceEngine(EvidenceRuleRegistry.from_yaml("config/evidence_rules.yaml"))
+    pair = EvidenceSnapshotPair(
+        pre_injection=EvidenceSnapshot(boundary=SnapshotBoundary.PRE_INJECTION, metrics={"lock_waits": 1.0}),
+        post_action=EvidenceSnapshot(boundary=SnapshotBoundary.POST_ACTION, metrics={}),
+    )
+    result = engine.evaluate_snapshot_rule("lock_contention", pair)
+    assert result.status == EvidenceStatus.MISSING
+    assert result.hit is False
 
 
 def test_consecutive_samples_are_required() -> None:

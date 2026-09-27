@@ -13,6 +13,7 @@ from ..models.evidence import (
     EvidenceReference,
     EvidenceResult,
     EvidenceRule,
+    EvidenceSnapshotPair,
     EvidenceStatus,
 )
 from ..metrics.timeline import ExperimentPhase, ExperimentTimeline, MetricSample
@@ -31,6 +32,43 @@ class EvidenceEngine:
         baseline_phase: ExperimentPhase = ExperimentPhase.BASELINE,
     ) -> EvidenceResult:
         return self.evaluate(self.registry.get(rule_id), timeline, phase=phase, baseline_phase=baseline_phase)
+
+    def evaluate_snapshot_rule(self, rule_id: str, snapshots: EvidenceSnapshotPair) -> EvidenceResult:
+        return self.evaluate_snapshot(self.registry.get(rule_id), snapshots)
+
+    def evaluate_snapshot(self, rule: EvidenceRule, snapshots: EvidenceSnapshotPair) -> EvidenceResult:
+        pre = _find_snapshot_metric(snapshots.pre_injection.metrics, rule.metric)
+        post = _find_snapshot_metric(snapshots.post_action.metrics, rule.metric)
+        if pre is None or post is None:
+            return EvidenceResult(
+                rule_id=rule.id,
+                metric=rule.metric,
+                status=EvidenceStatus.MISSING,
+                hit=False,
+                reason=f"snapshot metric {rule.metric} is missing",
+            )
+        if not math.isfinite(pre) or not math.isfinite(post):
+            return EvidenceResult(
+                rule_id=rule.id,
+                metric=rule.metric,
+                status=EvidenceStatus.INVALID,
+                hit=False,
+                reason="snapshot metric contains NaN or infinity",
+            )
+        comparison = post - pre
+        hit = _compare(comparison, rule.operator, rule.threshold)
+        return EvidenceResult(
+            rule_id=rule.id,
+            metric=rule.metric,
+            status=EvidenceStatus.HIT if hit else EvidenceStatus.MISS,
+            hit=hit,
+            aggregate_value=post,
+            reference_value=pre,
+            comparison_value=comparison,
+            samples_considered=1,
+            longest_consecutive_samples=1 if hit else 0,
+            reason="snapshot rule satisfied" if hit else "snapshot rule not satisfied",
+        )
 
     def evaluate(
         self,
@@ -110,6 +148,15 @@ def _metric_samples(samples: Iterable[MetricSample], metric: str, phase: Experim
         for sample in samples
         if sample.phase == phase and (sample.metric_name == metric or sample.metric_name.endswith(f".{metric}"))
     ]
+
+
+def _find_snapshot_metric(metrics: dict[str, float], metric: str) -> float | None:
+    if metric in metrics:
+        return metrics[metric]
+    for name, value in metrics.items():
+        if name.endswith(f".{metric}"):
+            return value
+    return None
 
 
 def _aggregate(values: list[float], aggregation: EvidenceAggregation) -> float:

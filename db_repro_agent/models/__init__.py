@@ -33,6 +33,9 @@ from .evidence import (
     EvidenceResult,
     EvidenceRule,
     EvidenceStatus,
+    EvidenceSnapshot,
+    EvidenceSnapshotPair,
+    SnapshotBoundary,
 )
 from .experiment_state import ExperimentPhase, ExperimentState, StateTransition
 
@@ -63,6 +66,9 @@ __all__ = [
     "EvidenceResult",
     "EvidenceRule",
     "EvidenceStatus",
+    "EvidenceSnapshot",
+    "EvidenceSnapshotPair",
+    "SnapshotBoundary",
     "ExperimentPhase",
     "ExperimentState",
     "StateTransition",

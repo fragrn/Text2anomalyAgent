@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +31,31 @@ class EvidenceReference(StrEnum):
     ABSOLUTE = "absolute"
     BASELINE = "baseline"
     WINDOW_START = "window_start"
+    SNAPSHOT = "snapshot"
+
+
+class SnapshotBoundary(StrEnum):
+    PRE_INJECTION = "pre_injection"
+    POST_ACTION = "post_action"
+    POST_RECOVERY = "post_recovery"
+
+
+class EvidenceSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    boundary: SnapshotBoundary
+    captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metrics: dict[str, float] = Field(default_factory=dict)
+    supporting_data: dict[str, Any] = Field(default_factory=dict)
+    success: bool = True
+    error: str | None = None
+
+
+class EvidenceSnapshotPair(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pre_injection: EvidenceSnapshot
+    post_action: EvidenceSnapshot
 
 
 class EvidenceRule(BaseModel):
@@ -42,6 +68,7 @@ class EvidenceRule(BaseModel):
     threshold: float
     reference: EvidenceReference
     min_consecutive_samples: int = Field(default=1, ge=1)
+    source: Literal["timeline", "snapshot"] = "timeline"
 
 
 class EvidenceStatus(StrEnum):

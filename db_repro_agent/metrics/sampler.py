@@ -7,6 +7,7 @@ from typing import Any
 
 from .collector import MetricsCollector
 from .timeline import ExperimentPhase, ExperimentTimeline
+from ..models.evidence import EvidenceSnapshot, SnapshotBoundary
 
 
 class MetricsSampler:
@@ -43,6 +44,9 @@ class MetricsSampler:
             self._thread.join(timeout=join_timeout)
         if self.timeline is not None:
             self.timeline.mark(ExperimentPhase.STOPPED, name="workload_stop")
+
+    def capture_snapshot(self, boundary: SnapshotBoundary) -> EvidenceSnapshot:
+        return self.collector.snapshot(boundary)
 
     def _run(self) -> None:
         assert self.timeline is not None

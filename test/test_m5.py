@@ -16,6 +16,7 @@ from db_repro_agent.metrics.sampler import MetricsSampler
 from db_repro_agent.metrics.slow_log import SlowLogTracker
 from db_repro_agent.metrics.system_metrics import SystemMetricsProvider
 from db_repro_agent.metrics.timeline import ExperimentPhase, ExperimentTimeline
+from db_repro_agent.models.evidence import SnapshotBoundary
 from db_repro_agent.tools.database.base import ToolResult, utc_now
 from db_repro_agent.tools.database.mysql import MySQLAdapter, MySQLConfig
 
@@ -27,6 +28,9 @@ class CountingProvider:
     def collect(self) -> dict[str, float]:
         self.count += 1
         return {"value": float(self.count)}
+
+    def snapshot(self) -> dict[str, float]:
+        return {"value": 100.0 + self.count}
 
 
 class SlowCounterAdapter:
@@ -78,6 +82,20 @@ def test_sampler_continues_collecting_while_main_thread_changes_phase() -> None:
     assert timeline.current_phase == ExperimentPhase.STOPPED
 
 
+def test_boundary_snapshot_is_separate_from_periodic_timeline_sampling() -> None:
+    provider = CountingProvider()
+    timeline = ExperimentTimeline()
+    collector = MetricsCollector({"test": provider})
+
+    collector.collect_once(timeline, phase=ExperimentPhase.BASELINE)
+    snapshot = collector.snapshot(SnapshotBoundary.PRE_INJECTION)
+
+    assert snapshot.success is True
+    assert snapshot.boundary == SnapshotBoundary.PRE_INJECTION
+    assert snapshot.metrics["test.value"] == 101.0
+    assert len(timeline.samples) == 1
+
+
 def test_slow_log_uses_marker_delta_not_historical_total() -> None:
     tracker = SlowLogTracker(SlowCounterAdapter([100, 105]))
 
@@ -123,6 +141,8 @@ def test_mysql_provider_converts_counters_to_rates() -> None:
                 {"Variable_name": "Com_commit", "Value": str(base)},
                 {"Variable_name": "Com_rollback", "Value": "0"},
                 {"Variable_name": "Innodb_row_lock_current_waits", "Value": "2"},
+                {"Variable_name": "Innodb_row_lock_waits", "Value": "12"},
+                {"Variable_name": "Innodb_row_lock_time", "Value": "3500"},
                 {"Variable_name": "Slow_queries", "Value": "7"},
             ]
             return ToolResult.ok(rows, utc_now(), utc_now())
@@ -135,7 +155,9 @@ def test_mysql_provider_converts_counters_to_rates() -> None:
     assert first["qps"] == 0
     assert second["qps"] > 0
     assert second["tps"] > 0
-    assert second["lock_waits"] == 2
+    assert second["lock_waits"] == 12
+    assert second["lock_waits_current"] == 2
+    assert second["lock_wait_time_ms"] == 3500
 
 
 def _live_adapter_or_skip() -> MySQLAdapter:
