@@ -54,6 +54,7 @@ class PropagationRunResult(BaseModel):
     full_graph_success: bool = False
     metrics_sample_count: int = 0
     cleanup_success: bool = False
+    background_alive_before_cleanup: bool | None = None
     timeline: Any
 
 
@@ -91,6 +92,7 @@ class PropagationRunner:
         root_result: ActionResult | None = None
         background_result: ActionResult | None = None
         background_started = False
+        background_alive_before_cleanup: bool | None = None
         cleanup_success = False
 
         try:
@@ -107,6 +109,7 @@ class PropagationRunner:
                         observations,
                         observation_provider,
                         cleanup_success=False,
+                        background_alive_before_cleanup=False,
                     )
 
             self.sampler.start(timeline, phase=ExperimentPhase.WARMUP)
@@ -130,6 +133,8 @@ class PropagationRunner:
                 time.sleep(request.recovery_seconds)
         finally:
             self.sampler.stop()
+            if request.background_workload is not None and background_started:
+                background_alive_before_cleanup = _background_alive(self.dispatcher)
             try:
                 self.dispatcher.cleanup(request.root_action)
                 if request.background_workload is not None and background_started:
@@ -147,6 +152,7 @@ class PropagationRunner:
             observations,
             observation_provider,
             cleanup_success=cleanup_success,
+            background_alive_before_cleanup=background_alive_before_cleanup,
         )
 
     def _result(
@@ -160,6 +166,7 @@ class PropagationRunner:
         observation_provider: ObservationProvider | None,
         *,
         cleanup_success: bool,
+        background_alive_before_cleanup: bool | None,
     ) -> PropagationRunResult:
         if observation_provider is not None:
             observations = observation_provider(timeline)
@@ -174,12 +181,13 @@ class PropagationRunner:
         full_success = (
             action_success
             and background_success
+            and background_alive_before_cleanup is not False
             and cleanup_success
             and graph_evaluation.all_nodes_hit
             and graph_evaluation.all_edges_satisfied
         )
         status = ResultStatus.EXPERIMENT_SUCCESS if full_success else (
-            ResultStatus.SYSTEM_ERROR if not action_success or not background_success or not cleanup_success
+            ResultStatus.SYSTEM_ERROR if not action_success or not background_success or background_alive_before_cleanup is False or not cleanup_success
             else ResultStatus.EXPERIMENT_MISS
         )
         return PropagationRunResult(
@@ -194,6 +202,7 @@ class PropagationRunner:
             full_graph_success=full_success,
             metrics_sample_count=len(timeline.samples),
             cleanup_success=cleanup_success,
+            background_alive_before_cleanup=background_alive_before_cleanup,
             timeline=timeline,
         )
 
@@ -207,3 +216,13 @@ def _first_trigger_times(
         for observation in values
         if observation.hit and observation.timestamp_sec is not None
     }
+
+
+def _background_alive(dispatcher: ActionDispatcher) -> bool:
+    executor = getattr(dispatcher, "benchbase", None)
+    is_alive = getattr(executor, "is_alive", None)
+    if callable(is_alive):
+        return bool(is_alive())
+    # Test doubles and remote executors may not expose a process handle. In
+    # that case a successful start is the strongest available signal.
+    return True

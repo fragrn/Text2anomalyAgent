@@ -91,6 +91,29 @@ def test_action_models_cover_all_executable_types() -> None:
     assert chaos.resource == "cpu"
 
 
+def test_benchbase_normalizes_jar_path_to_absolute_path(tmp_path: Path) -> None:
+    jar = tmp_path / "benchbase.jar"
+    config = tmp_path / "config.xml"
+    jar.write_text("fixture", encoding="utf-8")
+    config.write_text("<config />", encoding="utf-8")
+    action = BenchBaseAction(
+        action_id="bb-path",
+        target_node="traffic_surge",
+        benchmark="tpcc",
+        database="tpcc10_test",
+        terminals=1,
+        duration_sec=1,
+        config_path=str(config),
+        jar_path=str(Path(".") / jar.name),
+        results_dir=str(tmp_path / "results"),
+    )
+    executor = BenchBaseExecutor()
+    normalized = executor._normalize_action(action.model_copy(update={"jar_path": str(jar)}))
+
+    assert Path(normalized.jar_path).is_absolute()
+    assert Path(normalized.jar_path) == jar.resolve()
+
+
 def test_dispatcher_routes_four_action_types() -> None:
     dispatcher = ActionDispatcher()
     actions = [

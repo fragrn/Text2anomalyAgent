@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -94,22 +95,22 @@ def _sql_root(case: ChainCase, database: str):
     raise ValueError(f"no SQL root factory for {case.root_node}")
 
 
-def _root_action(case: ChainCase, database: str, env: dict[str, str]):
+def _root_action(case: ChainCase, database: str, env: dict[str, str], output_root: Path = OUTPUT_ROOT):
     if case.root_node in {"resource_cpu", "resource_memory"}:
         blade = env.get("DBMAGS_CHAOSBLADE_PATH", ".tools/chaosblade-1.8.0-darwin_arm64/blade")
         resource = "cpu" if case.root_node == "resource_cpu" else "memory"
         command = "cpu load --cpu-percent 80 --timeout 20" if resource == "cpu" else "mem load --mode ram --mem-percent 30 --timeout 20"
         return ChaosBladeAction(action_id=f"{case.case_id}-root", target_node=case.root_node, resource=resource, command=command, duration_sec=20, blade_path=blade)
     if case.root_node == "traffic_surge":
-        return _benchbase_action(case, database, env)
+        return _benchbase_action(case, database, env, output_root=output_root)
     return _sql_root(case, database)
 
 
-def _benchbase_action(case: ChainCase, database: str, env: dict[str, str]) -> BenchBaseAction:
+def _benchbase_action(case: ChainCase, database: str, env: dict[str, str], *, output_root: Path = OUTPUT_ROOT) -> BenchBaseAction:
     source = REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/config/mysql/sample_tpcc_config.xml"
     if not source.is_file():
         raise FileNotFoundError(f"BenchBase TPCC config does not exist: {source}")
-    destination = OUTPUT_ROOT / case.case_id / "tpcc.xml"
+    destination = output_root / case.case_id / "tpcc.xml"
     destination.parent.mkdir(parents=True, exist_ok=True)
     text = source.read_text(encoding="utf-8")
     url = html.escape(
@@ -130,7 +131,7 @@ def _benchbase_action(case: ChainCase, database: str, env: dict[str, str]) -> Be
         duration_sec=60,
         config_path=str(destination),
         jar_path=str(REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/benchbase.jar"),
-        results_dir=str(OUTPUT_ROOT / case.case_id / "benchbase-results"),
+        results_dir=str(output_root / case.case_id / "benchbase-results"),
     )
 
 
@@ -173,8 +174,8 @@ def _observations(timeline, case: ChainCase) -> list[NodeObservation]:
     return observed
 
 
-def _write_result(case: ChainCase, payload: dict[str, Any]) -> Path:
-    destination = OUTPUT_ROOT / case.case_id
+def _write_result(case: ChainCase, payload: dict[str, Any], output_root: Path) -> Path:
+    destination = output_root / case.case_id
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "result.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     if isinstance(payload.get("timeline"), list):
@@ -184,23 +185,23 @@ def _write_result(case: ChainCase, payload: dict[str, Any]) -> Path:
     return destination
 
 
-def run_case(case: ChainCase, *, run_real: bool, include_risky: bool) -> dict[str, Any]:
+def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_root: Path) -> dict[str, Any]:
     payload: dict[str, Any] = {"case_id": case.case_id, "chain": list(case.chain), "declared_status": case.status, "reason": case.reason, "started_at": time.time()}
     if case.status == "skipped":
         payload.update(status="skipped", skip_reason=case.reason)
-        _write_result(case, payload)
+        _write_result(case, payload, output_root)
         return payload
     if case.risky and not include_risky:
         payload.update(status="skipped", skip_reason="risky case requires --include-risky")
-        _write_result(case, payload)
+        _write_result(case, payload, output_root)
         return payload
     if not run_real:
         try:
-            action = _root_action(case, _config(_dotenv()).database, _dotenv())
+            action = _root_action(case, _config(_dotenv()).database, _dotenv(), output_root)
             payload.update(status="planned", root_action=action.model_dump(mode="json"))
         except Exception as exc:
             payload.update(status="planned", planning_error=str(exc))
-        _write_result(case, payload)
+        _write_result(case, payload, output_root)
         return payload
 
     env = _dotenv()
@@ -215,17 +216,17 @@ def run_case(case: ChainCase, *, run_real: bool, include_risky: bool) -> dict[st
             return payload
     try:
         config = _config(env)
-        action = _root_action(case, config.database, env)
+        action = _root_action(case, config.database, env, output_root)
         adapter = MySQLAdapter(config)
         collector = MetricsCollector({"mysql": MySQLMetricsProvider(adapter), "system": SystemMetricsProvider()})
         runner = PropagationRunner(dispatcher=ActionDispatcher(adapter), sampler=MetricsSampler(collector, interval_seconds=1.0))
-        background = None if case.root_node == "traffic_surge" else _benchbase_action(case, config.database, env)
+        background = None if case.root_node == "traffic_surge" else _benchbase_action(case, config.database, env, output_root=output_root)
         request = PropagationReproductionRequest(incident_id=f"human-{case.case_id}", graph=_graph(case), root_action=action, background_workload=background, baseline_seconds=5, observe_seconds=10, recovery_seconds=1)
         result = runner.run(request, observation_provider=lambda timeline: _observations(timeline, case))
         payload.update(status=result.status.value, result=result.model_dump(mode="json", exclude={"timeline"}), timeline=result.timeline.records())
     except Exception as exc:
         payload.update(status="system_error", error_type=type(exc).__name__, error=str(exc))
-    _write_result(case, payload)
+    _write_result(case, payload, output_root)
     return payload
 
 
@@ -245,11 +246,12 @@ def main() -> int:
     if not args.all and args.case not in CASE_BY_ID:
         parser.error(f"unknown case: {args.case}")
     selected = CASES if args.all else [CASE_BY_ID[args.case]]
-    results = [run_case(case, run_real=args.run_real, include_risky=args.include_risky) for case in selected]
+    output_root = OUTPUT_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    results = [run_case(case, run_real=args.run_real, include_risky=args.include_risky, output_root=output_root) for case in selected]
     summary = {"run_at": time.time(), "results": results}
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    (OUTPUT_ROOT / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    print(json.dumps({"output": str(OUTPUT_ROOT), "counts": {status: sum(item["status"] == status for item in results) for status in sorted({item["status"] for item in results})}}, ensure_ascii=False))
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    print(json.dumps({"output": str(output_root), "counts": {status: sum(item["status"] == status for item in results) for status in sorted({item["status"] for item in results})}}, ensure_ascii=False))
     return 0
 
 

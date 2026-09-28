@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 from ..models.action import ActionResult, BenchBaseAction
 from .command_executor import CommandExecutor, _iso
@@ -26,13 +27,14 @@ class BenchBaseExecutor:
             raise ValueError("benchmark must not contain surrounding whitespace")
 
     def start(self, action: BenchBaseAction) -> ActionResult:
+        action = self._normalize_action(action)
         self.validate(action)
         command = self._command(action)
         started = time.time()
         try:
             self.process = subprocess.Popen(
                 command,
-                cwd=os.path.dirname(action.jar_path),
+                cwd=str(Path(action.jar_path).parent),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -62,6 +64,7 @@ class BenchBaseExecutor:
             )
 
     def execute(self, action: BenchBaseAction) -> ActionResult:
+        action = self._normalize_action(action)
         if self.process is None or self.process.poll() is not None:
             started = self.start(action)
             if not started.success:
@@ -114,6 +117,15 @@ class BenchBaseExecutor:
         self.process = None
         self.action = None
         return _lifecycle_result(action, "cleaned")
+
+    def is_alive(self) -> bool:
+        """Return whether the background BenchBase process is alive."""
+        return self.process is not None and self.process.poll() is None
+
+    @staticmethod
+    def _normalize_action(action: BenchBaseAction) -> BenchBaseAction:
+        jar_path = str(Path(action.jar_path).expanduser().resolve())
+        return action.model_copy(update={"jar_path": jar_path})
 
     @staticmethod
     def _command(action: BenchBaseAction) -> list[str]:

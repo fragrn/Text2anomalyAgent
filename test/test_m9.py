@@ -44,6 +44,9 @@ class FakeBenchBase:
         self.cleaned += 1
         return result(action.action_id, action.type, "cleaned")
 
+    def is_alive(self):
+        return self.started > self.cleaned
+
 
 class FakeDispatcher:
     def __init__(self) -> None:
@@ -163,6 +166,7 @@ def test_background_workload_is_started_and_cleaned() -> None:
     req = request().model_copy(update={"background_workload": background})
     result = runner.run(req, observations=observations())
     assert result.cleanup_success is True
+    assert result.background_alive_before_cleanup is True
     assert result.full_graph_success is True
     assert dispatcher.benchbase.started == 1
     assert dispatcher.benchbase.cleaned == 1
