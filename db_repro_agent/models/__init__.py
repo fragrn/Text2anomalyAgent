@@ -38,6 +38,7 @@ from .evidence import (
     SnapshotBoundary,
 )
 from .experiment_state import ExperimentPhase, ExperimentState, StateTransition
+from .anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
 
 __all__ = [
     "ExperimentId",
@@ -72,4 +73,7 @@ __all__ = [
     "ExperimentPhase",
     "ExperimentState",
     "StateTransition",
+    "AnomalyNode",
+    "AnomalyEdge",
+    "AnomalyGraph",
 ]
