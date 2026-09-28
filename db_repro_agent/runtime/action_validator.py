@@ -72,6 +72,20 @@ class ActionValidator:
             "resource_pressure",
             "missing_index",
             "backup",
+            "connection_storm",
+            "deadlock_storm",
+            "disk_full_or_pressure",
+            "excessive_index",
+            "hot_update",
+            "improper_sql",
+            "large_temp_table",
+            "metadata_lock",
+            "missing_index",
+            "network_latency",
+            "redo_log_pressure",
+            "resource_io",
+            "resource_memory",
+            "resource_cpu",
         }
         self.max_duration_sec = max_duration_sec
         self.max_concurrency = max_concurrency

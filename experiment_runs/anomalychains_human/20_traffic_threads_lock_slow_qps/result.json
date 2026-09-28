@@ -1,0 +1,16 @@
+{
+  "case_id": "20_traffic_threads_lock_slow_qps",
+  "chain": [
+    "traffic_surge",
+    "threads_concurrency_up",
+    "lock_contention",
+    "slow_query",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "BenchBase TPCC root",
+  "started_at": 1790583698.7298281,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}

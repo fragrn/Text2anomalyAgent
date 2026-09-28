@@ -144,6 +144,11 @@ def test_mysql_provider_converts_counters_to_rates() -> None:
                 {"Variable_name": "Innodb_row_lock_waits", "Value": "12"},
                 {"Variable_name": "Innodb_row_lock_time", "Value": "3500"},
                 {"Variable_name": "Slow_queries", "Value": "7"},
+                {"Variable_name": "Innodb_log_waits", "Value": "4"},
+                {"Variable_name": "Innodb_os_log_pending_fsyncs", "Value": "0"},
+                {"Variable_name": "Innodb_os_log_pending_writes", "Value": "0"},
+                {"Variable_name": "Max_used_connections", "Value": "3"},
+                {"Variable_name": "Aborted_connects", "Value": "0"},
             ]
             return ToolResult.ok(rows, utc_now(), utc_now())
 

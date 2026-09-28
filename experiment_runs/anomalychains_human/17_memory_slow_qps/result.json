@@ -1,0 +1,13 @@
+{
+  "case_id": "17_memory_slow_qps",
+  "chain": [
+    "resource_memory",
+    "slow_query",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "ChaosBlade memory root",
+  "started_at": 1790583698.723176,
+  "status": "skipped",
+  "skip_reason": "risky case requires --include-risky"
+}

@@ -1,0 +1,15 @@
+{
+  "case_id": "19_table_lock_wait_qps",
+  "chain": [
+    "table_lock",
+    "lock_contention",
+    "lock_wait",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "table-lock transaction root",
+  "started_at": 1790583698.729356,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}

@@ -1,0 +1,15 @@
+{
+  "case_id": "01_backup_io_redo_qps",
+  "chain": [
+    "backup",
+    "resource_bottleneck_io",
+    "redo_log_flush_stall",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "SQL backup root plus observed downstream nodes",
+  "started_at": 1790583698.7106218,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}

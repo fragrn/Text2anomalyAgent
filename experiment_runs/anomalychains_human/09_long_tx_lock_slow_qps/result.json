@@ -1,0 +1,15 @@
+{
+  "case_id": "09_long_tx_lock_slow_qps",
+  "chain": [
+    "long_tx",
+    "lock_contention",
+    "slow_query",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "long transaction root",
+  "started_at": 1790583698.718202,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}

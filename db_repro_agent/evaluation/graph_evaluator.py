@@ -35,25 +35,41 @@ class GraphEvaluator:
         self,
         graph: AnomalyGraph,
         observations: list[NodeObservation] | dict[str, NodeObservation],
+        *,
+        ignored_nodes: set[str] | None = None,
     ) -> GraphEvaluation:
         self.validator.assert_valid(graph)
         observation_map = observations if isinstance(observations, dict) else {item.node_id: item for item in observations}
+        ignored = ignored_nodes or set()
         node_results = {
             node.node_id: self.node_evaluator.evaluate(node, observation_map.get(node.node_id))
             for node in graph.nodes
         }
+        for node_id in ignored:
+            if node_id in node_results:
+                node_results[node_id] = node_results[node_id].model_copy(
+                    update={
+                        "hit": True,
+                        "evaluated": False,
+                        "detected_at_sec": node_results[node_id].detected_at_sec if node_results[node_id].detected_at_sec is not None else 0.0,
+                        "reason": "root injection node evaluation skipped",
+                    }
+                )
         edge_results = []
         for edge in graph.edges:
             edge_results.append(self.edge_evaluator.evaluate(edge, node_results[edge.source], node_results[edge.target]))
 
-        failed_node = next((node.node_id for node in _topological_nodes(graph) if not node_results[node.node_id].hit), None)
+        failed_node = next(
+            (node.node_id for node in _topological_nodes(graph) if node.node_id not in ignored and not node_results[node.node_id].hit),
+            None,
+        )
         failed_edge = next((f"{edge.source}->{edge.target}" for edge in graph.edges if not edge_results[graph.edges.index(edge)].satisfied), None)
         prefix = _longest_prefix(graph, node_results, edge_results)
         return GraphEvaluation(
             graph_id=graph.graph_id,
             node_results=node_results,
             edge_results=edge_results,
-            all_nodes_hit=all(result.hit for result in node_results.values()),
+            all_nodes_hit=all(result.hit for node_id, result in node_results.items() if node_id not in ignored),
             all_edges_satisfied=all(result.satisfied for result in edge_results),
             failed_node=failed_node,
             failed_edge=failed_edge,
@@ -94,4 +110,3 @@ def _longest_prefix(graph: AnomalyGraph, nodes: dict[str, NodeEvaluation], edges
             break
         prefix.append(node.node_id)
     return prefix
-

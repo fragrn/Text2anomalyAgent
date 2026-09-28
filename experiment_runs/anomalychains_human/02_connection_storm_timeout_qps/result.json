@@ -1,0 +1,15 @@
+{
+  "case_id": "02_connection_storm_timeout_qps",
+  "chain": [
+    "connection_storm",
+    "connection_pressure",
+    "timeout",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "concurrent SQL root; timeout is observed",
+  "started_at": 1790583698.7144818,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}

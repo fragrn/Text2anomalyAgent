@@ -22,6 +22,11 @@ class MySQLMetricsProvider:
         "Innodb_row_lock_waits",
         "Innodb_row_lock_time",
         "Slow_queries",
+        "Innodb_log_waits",
+        "Innodb_os_log_pending_fsyncs",
+        "Innodb_os_log_pending_writes",
+        "Max_used_connections",
+        "Aborted_connects",
     )
 
     def __init__(self, adapter: MySQLAdapter) -> None:
@@ -39,6 +44,11 @@ class MySQLMetricsProvider:
             "lock_waits_current": counters.get("Innodb_row_lock_current_waits", 0.0),
             "lock_wait_time_ms": counters.get("Innodb_row_lock_time", 0.0),
             "slow_queries_total": counters.get("Slow_queries", 0.0),
+            "innodb_log_waits": counters.get("Innodb_log_waits", 0.0),
+            "innodb_os_log_pending_fsyncs": counters.get("Innodb_os_log_pending_fsyncs", 0.0),
+            "innodb_os_log_pending_writes": counters.get("Innodb_os_log_pending_writes", 0.0),
+            "max_used_connections": counters.get("Max_used_connections", 0.0),
+            "aborted_connects": counters.get("Aborted_connects", 0.0),
         }
         if self._previous is not None and self._previous_at is not None:
             elapsed = max(now - self._previous_at, 1e-9)
@@ -46,9 +56,13 @@ class MySQLMetricsProvider:
             commits = counters.get("Com_commit", 0.0) + counters.get("Com_rollback", 0.0)
             previous_commits = self._previous.get("Com_commit", 0.0) + self._previous.get("Com_rollback", 0.0)
             metrics["tps"] = max(0.0, commits - previous_commits) / elapsed
+            metrics["innodb_log_waits_delta"] = max(0.0, counters.get("Innodb_log_waits", 0.0) - self._previous.get("Innodb_log_waits", 0.0))
+            metrics["aborted_connects_delta"] = max(0.0, counters.get("Aborted_connects", 0.0) - self._previous.get("Aborted_connects", 0.0))
         else:
             metrics["qps"] = 0.0
             metrics["tps"] = 0.0
+            metrics["innodb_log_waits_delta"] = 0.0
+            metrics["aborted_connects_delta"] = 0.0
         self._previous = counters
         self._previous_at = now
         return metrics

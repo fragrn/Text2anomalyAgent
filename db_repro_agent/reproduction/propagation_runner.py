@@ -165,7 +165,7 @@ class PropagationRunner:
             observations = observation_provider(timeline)
         if observations is None:
             observations = []
-        graph_evaluation = self.graph_evaluator.evaluate(request.graph, observations)
+        graph_evaluation = self.graph_evaluator.evaluate(request.graph, observations, ignored_nodes=set(roots))
         first_times = _first_trigger_times(observations)
         action_success = root_result is not None and root_result.success
         background_success = request.background_workload is None or (
@@ -207,4 +207,3 @@ def _first_trigger_times(
         for observation in values
         if observation.hit and observation.timestamp_sec is not None
     }
-

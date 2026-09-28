@@ -1,0 +1,14 @@
+{
+  "case_id": "18_memory_sort_spill_slow_qps",
+  "chain": [
+    "resource_memory",
+    "sort_hash_spill",
+    "slow_query",
+    "qps_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "ChaosBlade memory root; spill is observed",
+  "started_at": 1790583698.7238379,
+  "status": "skipped",
+  "skip_reason": "risky case requires --include-risky"
+}

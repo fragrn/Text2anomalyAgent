@@ -9,7 +9,13 @@ from db_repro_agent.metrics.collector import MetricsCollector
 from db_repro_agent.metrics.sampler import MetricsSampler
 from db_repro_agent.models.action import ActionResult, BenchBaseAction, SQLAction
 from db_repro_agent.models.anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
+from db_repro_agent.reproduction.injection_actions import (
+    build_backup_action,
+    build_missing_index_action,
+    build_redo_log_pressure_action,
+)
 from db_repro_agent.evaluation.node_evaluator import NodeObservation
+from db_repro_agent.evaluation.node_evaluator import NodeEvaluator
 from db_repro_agent.reproduction.propagation_runner import (
     PropagationReproductionRequest,
     PropagationRunner,
@@ -193,3 +199,70 @@ def test_repeat_propagation_five_times() -> None:
         result = runner.run(request().model_copy(update={"incident_id": f"propagation-{index}"}), observations=observations())
         outcomes.append(result.full_graph_success)
     assert outcomes == [True] * 5
+
+
+def test_downstream_node_rules_are_metric_driven() -> None:
+    evaluator = NodeEvaluator()
+    cases = [
+        ("metadata_lock_wait", {"metadata_lock_wait_count": 1}, True),
+        ("poor_plan", {"rows_examined_ratio": 1.1}, True),
+        ("poor_plan", {"explain_access_type": "ALL"}, True),
+        ("improper_sql", {"rows_examined_ratio": 3.1}, True),
+        ("temp_table_spill", {"created_tmp_disk_tables_delta": 1}, True),
+        ("resource_bottleneck_cpu", {"cpu_usage_ratio": 1.2}, True),
+        ("disk_saturation", {"disk_util": 0.8}, True),
+        ("buffer_pool_pressure", {"innodb_buffer_pool_reads_delta": 2}, True),
+        ("redo_log_flush_stall", {"innodb_log_waits_delta": 1}, True),
+        ("write_throughput_drop", {"tps_ratio": 0.69}, True),
+        ("connection_pressure", {"threads_connected_delta": 1}, True),
+        ("timeout", {"timeout_error_count": 1}, True),
+        ("deadlock_detected", {"deadlock_delta": 1}, True),
+        ("network_stall", {"network_error_delta": 1}, True),
+        ("poor_plan", {"rows_examined_ratio": 1.0}, False),
+        ("write_throughput_drop", {"tps_ratio": 0.7}, False),
+    ]
+    for node_id, metrics, expected in cases:
+        evaluation = evaluator.evaluate(
+            AnomalyNode(node_id=node_id),
+            NodeObservation(node_id=node_id, metrics=metrics),
+        )
+        assert evaluation.hit is expected, (node_id, metrics, evaluation.reason)
+
+
+def test_m9_does_not_require_root_observation() -> None:
+    runner, _, _ = make_runner()
+    result = runner.run(
+        request(),
+        observations=[
+            NodeObservation(node_id="connections_up", hit=True, timestamp_sec=3),
+            NodeObservation(node_id="lock_contention", hit=True, timestamp_sec=6),
+        ],
+    )
+    assert result.full_graph_success is True
+    assert result.graph_evaluation is not None
+    assert result.graph_evaluation.node_results["traffic_surge"].evaluated is False
+
+
+def test_backup_injection_is_a_bounded_sql_action() -> None:
+    action = build_backup_action("backup-1", "tpcc10_test")
+    assert action.target_node == "backup"
+    assert action.sql == "CREATE TABLE dbmags_backup_shadow AS SELECT * FROM stock"
+    assert action.concurrency == 1
+
+
+def test_missing_index_injection_queries_without_schema_mutation() -> None:
+    action = build_missing_index_action("missing-index-1", "tpcc10_test")
+    assert action.target_node == "missing_index"
+    assert "SELECT * FROM stock" in action.sql
+    assert "LIKE '%DBMAGS-MISSING-INDEX%'" in action.sql
+    assert "ORDER BY s_data" in action.sql
+    assert not any(keyword in action.sql.upper() for keyword in ("CREATE INDEX", "DROP INDEX", "ALTER TABLE"))
+
+
+def test_redo_log_pressure_is_bounded_concurrent_write_sql() -> None:
+    action = build_redo_log_pressure_action("redo-1", "tpcc10_test", concurrency=4)
+    assert action.target_node == "redo_log_pressure"
+    assert action.execution_mode == "concurrent"
+    assert action.concurrency == 4
+    assert action.sql.startswith("UPDATE stock SET s_quantity = MOD(s_quantity + 1, 100)")
+    assert action.timeout_sec > action.duration_sec

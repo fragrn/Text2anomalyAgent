@@ -1,0 +1,15 @@
+{
+  "case_id": "14_redo_pressure_commit_throughput",
+  "chain": [
+    "redo_log_pressure",
+    "redo_log_flush_stall",
+    "commit_latency_up",
+    "write_throughput_drop"
+  ],
+  "declared_status": "runnable",
+  "reason": "bounded concurrent UPDATE root",
+  "started_at": 1790583698.721885,
+  "status": "environment_error",
+  "error_type": "PermissionError",
+  "error": "[Errno 1] Operation not permitted"
+}
