@@ -38,7 +38,7 @@ def test_action_models_cover_all_executable_types() -> None:
     )
     transaction = TransactionAction(
         action_id="lock-1",
-        target_node="lock_contention",
+        target_node="row_lock",
         database="dbmags_tool_test",
         actors=[
             TransactionActor(
@@ -170,7 +170,7 @@ def test_sql_executor_rejects_multiple_statements_before_database_call() -> None
 def test_transaction_executor_rejects_duplicate_actor_ids() -> None:
     action = TransactionAction(
         action_id="invalid-tx",
-        target_node="lock_contention",
+        target_node="row_lock",
         database="db",
         actors=[
             TransactionActor(actor_id="same", steps=[TransactionStep(sql="BEGIN")]),
@@ -239,14 +239,14 @@ def test_sql_action_select_sleep_duration() -> None:
 
 
 @pytest.mark.integration
-def test_transaction_holder_waiter_lock_contention() -> None:
+def test_transaction_holder_waiter_row_lock() -> None:
     if os.environ.get("DBMAGS_M3_ALLOW_WRITE_TEST") != "1":
         pytest.skip("set DBMAGS_M3_ALLOW_WRITE_TEST=1 with an isolated test database")
     adapter = _live_adapter_or_skip()
     database = os.environ.get("DBMAGS_MYSQL_DB", "dbmags_tool_test")
     action = TransactionAction(
         action_id="holder-waiter",
-        target_node="lock_contention",
+        target_node="row_lock",
         database=database,
         actors=[
             TransactionActor(

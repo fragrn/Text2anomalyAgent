@@ -37,8 +37,10 @@ class BenchBaseConfig(BaseModel):
 
     jar_path: Path = Path(".tools/benchbase-main/target/benchbase-mysql/benchbase.jar")
     config_dir: Path = Path(".tools/benchbase-main/target/benchbase-mysql/config/mysql")
+    config_path: Path | None = None
     results_dir: Path = Path(".tools/benchbase-main/target/benchbase-mysql/results")
     java_bin: str = "java"
+    minimum_java_major_version: int = Field(default=23, ge=8)
 
 
 class ExperimentWindowConfig(BaseModel):
@@ -47,6 +49,7 @@ class ExperimentWindowConfig(BaseModel):
     warmup_seconds: int = Field(default=10, ge=0)
     baseline_seconds: int = Field(default=30, ge=1)
     injection_seconds: int = Field(default=60, ge=1)
+    observe_seconds: int | None = Field(default=None, ge=1)
     recovery_seconds: int = Field(default=20, ge=0)
     sample_interval_seconds: float = Field(default=1.0, gt=0)
 
@@ -56,6 +59,61 @@ class AgentConfig(BaseModel):
 
     max_attempts: int = Field(default=3, ge=1)
     max_hitl_rounds: int = Field(default=2, ge=0)
+
+
+class WorkloadProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runner: str = "benchbase"
+    benchmark: str = "tpcc"
+    terminals: int = Field(default=4, ge=1)
+    rate: int = Field(default=10, ge=1)
+    duration_seconds: int = Field(default=180, ge=1)
+
+
+class AgentLimitsProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_action_duration_seconds: int = Field(default=15, ge=1)
+    max_concurrency: int = Field(default=8, ge=1)
+    max_retry_rounds: int = Field(default=2, ge=0)
+
+
+class InstrumentationProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slow_query_log: bool = True
+    long_query_time_seconds: float = Field(default=1.0, ge=0)
+    log_output: str = "FILE"
+
+
+class SnapshotProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    data_lock_waits_supporting: bool = True
+
+
+class ExperimentProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experiment: ExperimentWindowConfig = Field(default_factory=ExperimentWindowConfig)
+    workload: WorkloadProfile = Field(default_factory=WorkloadProfile)
+    benchbase: BenchBaseConfig = Field(default_factory=BenchBaseConfig)
+    agent_limits: AgentLimitsProfile = Field(default_factory=AgentLimitsProfile)
+    instrumentation: InstrumentationProfile = Field(default_factory=InstrumentationProfile)
+    snapshot: SnapshotProfile = Field(default_factory=SnapshotProfile)
+
+    def resolve_paths(self, base_dir: Path | None = None) -> "ExperimentProfile":
+        base = (base_dir or Path.cwd()).resolve()
+        values = self.model_dump()
+        benchbase = dict(values["benchbase"])
+        for key in ("jar_path", "config_dir", "config_path", "results_dir"):
+            if benchbase[key] is None:
+                continue
+            benchbase[key] = _resolve_path(benchbase[key], base)
+        values["benchbase"] = benchbase
+        return type(self).model_validate(values)
 
 
 class AppConfig(BaseModel):
@@ -73,7 +131,9 @@ class AppConfig(BaseModel):
         values = self.model_dump()
         values["artifact_root"] = _resolve_path(self.artifact_root, base)
         benchbase = dict(values["benchbase"])
-        for key in ("jar_path", "config_dir", "results_dir"):
+        for key in ("jar_path", "config_dir", "config_path", "results_dir"):
+            if benchbase[key] is None:
+                continue
             benchbase[key] = _resolve_path(benchbase[key], base)
         values["benchbase"] = benchbase
         return type(self).model_validate(values)
@@ -107,6 +167,24 @@ def load_config(path: str | Path | None = None, *, environ: dict[str, str] | Non
             "Invalid application configuration",
             code=ErrorCode.CONFIGURATION,
             details={"errors": exc.errors()},
+        ) from exc
+
+
+def load_experiment_profile(path: str | Path) -> ExperimentProfile:
+    """Load the human-adjustable experiment runtime profile."""
+    profile_path = Path(path)
+    if not profile_path.exists():
+        raise ReproductionError(
+            f"Experiment profile does not exist: {profile_path}", code=ErrorCode.CONFIGURATION
+        )
+    try:
+        raw = _read_mapping_file(profile_path)
+        return ExperimentProfile.model_validate(raw).resolve_paths(profile_path.parent.parent)
+    except (OSError, ValueError, ValidationError) as exc:
+        raise ReproductionError(
+            f"Invalid experiment profile: {profile_path}",
+            code=ErrorCode.CONFIGURATION,
+            details={"error": str(exc)},
         ) from exc
 
 

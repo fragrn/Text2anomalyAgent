@@ -62,7 +62,8 @@ class ActionValidator:
         self.allowed_target_nodes = allowed_target_nodes or {
             "traffic_surge",
             "connections_up",
-            "lock_contention",
+            "row_lock",
+            "table_blocking",
             "slow_query",
             "qps_drop",
             "cpu_saturation",
@@ -80,6 +81,7 @@ class ActionValidator:
             "improper_sql",
             "large_temp_table",
             "metadata_lock",
+            "metadata_lock_wait",
             "missing_index",
             "network_latency",
             "redo_log_pressure",

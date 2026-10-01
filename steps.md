@@ -891,7 +891,7 @@ traffic_surge
     ↓
 connections_up
     ↓
-lock_contention
+row_lock
     ↓
 slow_query
     ↓
@@ -1468,7 +1468,7 @@ Anomalies:
 - slow query
 
 Proposed:
-high_concurrency → lock_contention → slow_query
+high_concurrency → row_lock → slow_query
 
 Recommended mode:
 PROPAGATION

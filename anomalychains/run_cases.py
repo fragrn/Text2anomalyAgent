@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from db_repro_agent.evaluation.node_evaluator import NodeObservation
+from db_repro_agent.config import ExperimentProfile, load_experiment_profile
 from db_repro_agent.execution.dispatcher import ActionDispatcher
 from db_repro_agent.metrics.collector import MetricsCollector
 from db_repro_agent.metrics.mysql_metrics import MySQLMetricsProvider
@@ -30,6 +31,8 @@ from db_repro_agent.models.action import BenchBaseAction, ChaosBladeAction, SQLA
 from db_repro_agent.models.anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
 from db_repro_agent.reproduction.injection_actions import build_backup_action, build_missing_index_action, build_redo_log_pressure_action
 from db_repro_agent.reproduction.propagation_runner import PropagationReproductionRequest, PropagationRunner
+from db_repro_agent.runtime.experiment_setup import MySQLInstrumentation
+from db_repro_agent.runtime.preflight import run_preflight
 from db_repro_agent.tools.database.mysql import MySQLAdapter, MySQLConfig
 
 from .cases import CASES, CASE_BY_ID, ChainCase
@@ -37,6 +40,7 @@ from .cases import CASES, CASE_BY_ID, ChainCase
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = REPO_ROOT / "experiment_runs" / "anomalychains_human"
+PROFILE_PATH = REPO_ROOT / "config" / "experiment_profile.yaml"
 
 
 def _dotenv() -> dict[str, str]:
@@ -95,19 +99,19 @@ def _sql_root(case: ChainCase, database: str):
     raise ValueError(f"no SQL root factory for {case.root_node}")
 
 
-def _root_action(case: ChainCase, database: str, env: dict[str, str], output_root: Path = OUTPUT_ROOT):
+def _root_action(case: ChainCase, database: str, env: dict[str, str], output_root: Path = OUTPUT_ROOT, profile: ExperimentProfile | None = None):
     if case.root_node in {"resource_cpu", "resource_memory"}:
         blade = env.get("DBMAGS_CHAOSBLADE_PATH", ".tools/chaosblade-1.8.0-darwin_arm64/blade")
         resource = "cpu" if case.root_node == "resource_cpu" else "memory"
         command = "cpu load --cpu-percent 80 --timeout 20" if resource == "cpu" else "mem load --mode ram --mem-percent 30 --timeout 20"
         return ChaosBladeAction(action_id=f"{case.case_id}-root", target_node=case.root_node, resource=resource, command=command, duration_sec=20, blade_path=blade)
     if case.root_node == "traffic_surge":
-        return _benchbase_action(case, database, env, output_root=output_root)
+        return _benchbase_action(case, database, env, output_root=output_root, profile=profile)
     return _sql_root(case, database)
 
 
-def _benchbase_action(case: ChainCase, database: str, env: dict[str, str], *, output_root: Path = OUTPUT_ROOT) -> BenchBaseAction:
-    source = REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/config/mysql/sample_tpcc_config.xml"
+def _benchbase_action(case: ChainCase, database: str, env: dict[str, str], *, output_root: Path = OUTPUT_ROOT, profile: ExperimentProfile | None = None) -> BenchBaseAction:
+    source = profile.benchbase.config_path if profile and profile.benchbase.config_path else REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/config/mysql/sample_tpcc_config.xml"
     if not source.is_file():
         raise FileNotFoundError(f"BenchBase TPCC config does not exist: {source}")
     destination = output_root / case.case_id / "tpcc.xml"
@@ -124,18 +128,19 @@ def _benchbase_action(case: ChainCase, database: str, env: dict[str, str], *, ou
     return BenchBaseAction(
         action_id=f"{case.case_id}-root",
         target_node="traffic_surge",
-        benchmark="tpcc",
+        benchmark=profile.workload.benchmark if profile else "tpcc",
         database=database,
-        terminals=3,
-        rate=10,
-        duration_sec=60,
+        terminals=profile.workload.terminals if profile else 3,
+        rate=profile.workload.rate if profile else 10,
+        duration_sec=profile.workload.duration_seconds if profile else 60,
         config_path=str(destination),
-        jar_path=str(REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/benchbase.jar"),
+        jar_path=str(profile.benchbase.jar_path if profile else REPO_ROOT / ".tools/benchbase-main/target/benchbase-mysql/benchbase.jar"),
         results_dir=str(output_root / case.case_id / "benchbase-results"),
+        java_bin=profile.benchbase.java_bin if profile else "java",
     )
 
 
-def _observations(timeline, case: ChainCase) -> list[NodeObservation]:
+def _observations(timeline, case: ChainCase, *, adapter: MySQLAdapter | None = None, action: Any | None = None) -> list[NodeObservation]:
     samples = timeline.samples
     baseline = [sample for sample in samples if sample.phase.value == "baseline"]
     active = [sample for sample in samples if sample.phase.value in {"injection", "observing", "recovery"}]
@@ -156,19 +161,51 @@ def _observations(timeline, case: ChainCase) -> list[NodeObservation]:
         base = values(name, baseline)
         return (current[-1] - base[0]) if current and base else 0.0
 
+    def max_value(name: str, source) -> float:
+        return max(values(name, source), default=0.0)
+
+    def explain_metrics() -> dict[str, float | str | bool]:
+        if adapter is None or action is None or not hasattr(action, "sql"):
+            return {}
+        result = adapter.explain_sql(action.sql)
+        if not result.success or not result.data:
+            return {}
+        row = result.data[0]
+        return {
+            "explain_access_type": str(row.get("type", row.get("access_type", ""))),
+            "explain_extra": str(row.get("Extra", row.get("extra", ""))),
+        }
+
     observed: list[NodeObservation] = []
     for index, node in enumerate(case.chain[1:], start=1):
         metrics: dict[str, float | str | bool] = {
             "qps_ratio": ratio("qps"),
+            "row_lock_waits_delta": delta("row_lock_waits"),
+            "row_lock_current_waits": max_value("row_lock_current_waits", active),
+            "row_lock_wait_time_ms_delta": delta("row_lock_wait_time_ms"),
             "threads_connected_ratio": ratio("threads_connected"),
             "lock_waits_delta": delta("lock_waits"),
             "lock_waits_current": max(values("lock_waits_current", active), default=0.0),
             "slow_queries_delta": delta("slow_queries_total"),
+            "connection_error_delta": delta("connection_errors_total"),
+            "timeout_error_count": 0.0,
+            "metadata_lock_wait_count": max_value("metadata_lock_wait_count", active),
+            "table_blocking_wait_count": max_value("table_blocking_wait_count", active),
+            "table_blocking_current_count": max_value("table_blocking_current_count", active),
+            "created_tmp_disk_tables_delta": delta("created_tmp_disk_tables"),
+            "sort_merge_passes_delta": delta("sort_merge_passes"),
+            "temp_table_ratio": ratio("created_tmp_disk_tables"),
+            "sort_merge_passes_ratio": ratio("sort_merge_passes"),
+            "innodb_buffer_pool_reads_delta": delta("innodb_buffer_pool_reads"),
+            "deadlock_delta": delta("innodb_deadlocks"),
+            "io_wait_ratio": ratio("io_wait_ratio"),
+            "disk_util": max_value("disk_util", active),
             "cpu_usage_ratio": ratio("cpu_percent"),
             "memory_usage_ratio": ratio("memory_percent"),
             "innodb_log_waits_delta": delta("innodb_log_waits"),
             "tps_ratio": ratio("tps"),
         }
+        metrics.update(explain_metrics())
         timestamp = float(index * max(1, len(active) // max(1, len(case.chain) - 1)))
         observed.append(NodeObservation(node_id=node, timestamp_sec=timestamp, metrics=metrics))
     return observed
@@ -187,6 +224,8 @@ def _write_result(case: ChainCase, payload: dict[str, Any], output_root: Path) -
 
 def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_root: Path) -> dict[str, Any]:
     payload: dict[str, Any] = {"case_id": case.case_id, "chain": list(case.chain), "declared_status": case.status, "reason": case.reason, "started_at": time.time()}
+    profile = load_experiment_profile(PROFILE_PATH)
+    payload["experiment_profile"] = str(PROFILE_PATH)
     if case.status == "skipped":
         payload.update(status="skipped", skip_reason=case.reason)
         _write_result(case, payload, output_root)
@@ -197,7 +236,7 @@ def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_roo
         return payload
     if not run_real:
         try:
-            action = _root_action(case, _config(_dotenv()).database, _dotenv(), output_root)
+            action = _root_action(case, _config(_dotenv()).database, _dotenv(), output_root, profile)
             payload.update(status="planned", root_action=action.model_dump(mode="json"))
         except Exception as exc:
             payload.update(status="planned", planning_error=str(exc))
@@ -216,14 +255,25 @@ def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_roo
             return payload
     try:
         config = _config(env)
-        action = _root_action(case, config.database, env, output_root)
         adapter = MySQLAdapter(config)
-        collector = MetricsCollector({"mysql": MySQLMetricsProvider(adapter), "system": SystemMetricsProvider()})
-        runner = PropagationRunner(dispatcher=ActionDispatcher(adapter), sampler=MetricsSampler(collector, interval_seconds=1.0))
-        background = None if case.root_node == "traffic_surge" else _benchbase_action(case, config.database, env, output_root=output_root)
-        request = PropagationReproductionRequest(incident_id=f"human-{case.case_id}", graph=_graph(case), root_action=action, background_workload=background, baseline_seconds=5, observe_seconds=10, recovery_seconds=1)
-        result = runner.run(request, observation_provider=lambda timeline: _observations(timeline, case))
-        payload.update(status=result.status.value, result=result.model_dump(mode="json", exclude={"timeline"}), timeline=result.timeline.records())
+        preflight = run_preflight(adapter, profile, chaosblade_path=env.get("DBMAGS_CHAOSBLADE_PATH"))
+        payload["preflight"] = preflight.model_dump(mode="json")
+        if not preflight.passed:
+            payload.update(status="environment_error", error_type="PreflightFailed", error="experiment preflight failed")
+            _write_result(case, payload, output_root)
+            return payload
+        instrumentation = MySQLInstrumentation(adapter)
+        instrumentation_state = instrumentation.prepare(profile.instrumentation)
+        try:
+            action = _root_action(case, config.database, env, output_root, profile)
+            collector = MetricsCollector({"mysql": MySQLMetricsProvider(adapter), "system": SystemMetricsProvider()})
+            runner = PropagationRunner(dispatcher=ActionDispatcher(adapter), sampler=MetricsSampler(collector, interval_seconds=profile.experiment.sample_interval_seconds))
+            background = None if case.root_node == "traffic_surge" else _benchbase_action(case, config.database, env, output_root=output_root, profile=profile)
+            request = PropagationReproductionRequest(incident_id=f"human-{case.case_id}", graph=_graph(case), root_action=action, background_workload=background, baseline_seconds=profile.experiment.baseline_seconds, observe_seconds=profile.experiment.observe_seconds or profile.experiment.injection_seconds, recovery_seconds=profile.experiment.recovery_seconds)
+            result = runner.run(request, observation_provider=lambda timeline: _observations(timeline, case, adapter=adapter, action=action))
+            payload.update(status=result.status.value, result=result.model_dump(mode="json", exclude={"timeline"}), timeline=result.timeline.records())
+        finally:
+            instrumentation.restore(instrumentation_state)
     except Exception as exc:
         payload.update(status="system_error", error_type=type(exc).__name__, error=str(exc))
     _write_result(case, payload, output_root)

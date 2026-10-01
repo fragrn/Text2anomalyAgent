@@ -90,11 +90,11 @@ def graph() -> AnomalyGraph:
         nodes=[
             AnomalyNode(node_id="traffic_surge"),
             AnomalyNode(node_id="connections_up"),
-            AnomalyNode(node_id="lock_contention"),
+            AnomalyNode(node_id="row_lock"),
         ],
         edges=[
             AnomalyEdge(source="traffic_surge", target="connections_up", mechanism="connections", provenance="human", confidence=1),
-            AnomalyEdge(source="connections_up", target="lock_contention", mechanism="locks", provenance="human", confidence=1),
+            AnomalyEdge(source="connections_up", target="row_lock", mechanism="locks", provenance="human", confidence=1),
         ],
     )
 
@@ -126,7 +126,7 @@ def observations(all_hit: bool = True) -> list[NodeObservation]:
     return [
         NodeObservation(node_id="traffic_surge", hit=True, timestamp_sec=1),
         NodeObservation(node_id="connections_up", hit=all_hit, timestamp_sec=3),
-        NodeObservation(node_id="lock_contention", hit=all_hit, timestamp_sec=6),
+        NodeObservation(node_id="row_lock", hit=all_hit, timestamp_sec=6),
     ]
 
 
@@ -146,7 +146,7 @@ def test_root_only_is_executed_and_full_graph_is_evaluated() -> None:
     assert result.node_first_trigger_times == {
         "traffic_surge": 1.0,
         "connections_up": 3.0,
-        "lock_contention": 6.0,
+        "row_lock": 6.0,
     }
 
 
@@ -239,7 +239,7 @@ def test_m9_does_not_require_root_observation() -> None:
         request(),
         observations=[
             NodeObservation(node_id="connections_up", hit=True, timestamp_sec=3),
-            NodeObservation(node_id="lock_contention", hit=True, timestamp_sec=6),
+            NodeObservation(node_id="row_lock", hit=True, timestamp_sec=6),
         ],
     )
     assert result.full_graph_success is True

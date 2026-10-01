@@ -28,7 +28,7 @@ def validator(tmp_path: Path) -> ActionValidator:
     return ActionValidator(
         target_database="dbmags_tool_test",
         schema_provider=FakeSchemaProvider(),
-        allowed_target_nodes={"slow_query", "lock_contention", "cpu_saturation"},
+        allowed_target_nodes={"slow_query", "row_lock", "cpu_saturation"},
         max_duration_sec=300,
         allowed_path_roots=[tmp_path],
     )

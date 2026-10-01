@@ -151,7 +151,7 @@ def _sql_sleep(_: str, database: str) -> SQLAction:
 def _row_lock(_: str, database: str) -> TransactionAction:
     return TransactionAction(
         action_id="warehouse-row-lock",
-        target_node="lock_contention",
+        target_node="row_lock",
         database=database,
         actors=[
             TransactionActor(
@@ -233,7 +233,7 @@ def _chaos(resource: str, command: str, blade_path: str, database: str) -> Chaos
 def _cases(blade_path: str) -> list[Case]:
     return [
         Case("concurrent_sleep_connections", "connections_up", _sql_sleep, expected_hit=True),
-        Case("warehouse_row_lock", "lock_contention", _row_lock, expected_hit=True),
+        Case("warehouse_row_lock", "row_lock", _row_lock, expected_hit=True),
         Case("slow_query_log", "slow_query", _slow_query, expected_hit=True, requires_slow_log=True),
         Case("non_indexed_scan", "query_duration", _full_scan, expected_hit=True),
         Case("sql_cpu_benchmark", "sql_cpu_pressure", _sql_cpu, expected_hit=True),
@@ -330,7 +330,7 @@ def _log_timeline(case: Case, result) -> None:
                 status=severity.status.value,
                 delta=severity.comparison_value,
                 baseline=severity.reference_value,
-                threshold=1000.0 if severity.rule_id == "lock_contention_severe" else None,
+                threshold=1000.0 if severity.rule_id == "row_lock_severe" else None,
                 reason=severity.reason,
             )
         if result.evaluation.supporting_evidence:
@@ -479,7 +479,7 @@ def test_real_tpcc_background_anomaly_matrix(case: Case, tmp_path: Path) -> None
         baseline_seconds=5.0,
         observe_seconds=5.0,
         recovery_seconds=1.0,
-        severity_rule_id="lock_contention_severe" if case.name == "warehouse_row_lock" else None,
+        severity_rule_id="row_lock_severe" if case.name == "warehouse_row_lock" else None,
         supporting_rule_ids=(
             ["active_lock_wait"]
             if case.name == "warehouse_row_lock"

@@ -15,6 +15,20 @@ class RuntimeProbe:
         "Connections",
         "Questions",
         "Threads_created",
+        "Aborted_connects",
+        "Aborted_clients",
+        "Connection_errors_accept",
+        "Connection_errors_internal",
+        "Connection_errors_max_connections",
+        "Connection_errors_peer_address",
+        "Connection_errors_select",
+        "Connection_errors_tcpwrap",
+        "Created_tmp_tables",
+        "Created_tmp_disk_tables",
+        "Sort_merge_passes",
+        "Innodb_buffer_pool_reads",
+        "Innodb_buffer_pool_read_requests",
+        "Innodb_deadlocks",
     )
 
     def __init__(self, adapter) -> None:

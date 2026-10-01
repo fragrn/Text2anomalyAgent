@@ -16,17 +16,17 @@ slow_query:
   min_consecutive_samples: 1
   source: snapshot
 
-lock_contention:
-  metric: lock_waits
+row_lock:
+  metric: row_lock_waits
   aggregation: delta
-  reference: window_start
+  reference: snapshot
   operator: gt
   threshold: 0
   min_consecutive_samples: 1
   source: snapshot
 
-lock_contention_severe:
-  metric: lock_wait_time_ms
+row_lock_severe:
+  metric: row_lock_wait_time_ms
   aggregation: delta
   reference: snapshot
   operator: gte
@@ -36,6 +36,15 @@ lock_contention_severe:
 
 active_lock_wait:
   metric: lock_waits_current
+  aggregation: max
+  reference: absolute
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+  source: timeline
+
+table_blocking:
+  metric: table_blocking_wait_count
   aggregation: max
   reference: absolute
   operator: gt
@@ -94,5 +103,59 @@ memory_pressure:
   reference: baseline
   operator: gte
   threshold: 10
+  min_consecutive_samples: 1
+  source: timeline
+
+timeout_errors:
+  metric: timeout_error_count
+  aggregation: count
+  reference: snapshot
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+  source: snapshot
+
+metadata_lock_wait:
+  metric: metadata_lock_wait_count
+  aggregation: count
+  reference: snapshot
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+  source: timeline
+
+temp_table_spill:
+  metric: created_tmp_disk_tables_delta
+  aggregation: delta
+  reference: baseline
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+  source: timeline
+
+sort_hash_spill:
+  metric: sort_merge_passes_delta
+  aggregation: delta
+  reference: baseline
+  operator: gt
+  threshold: 0
+  min_consecutive_samples: 1
+  source: timeline
+
+poor_plan:
+  metric: rows_examined_ratio
+  aggregation: ratio
+  reference: baseline
+  operator: gt
+  threshold: 1
+  min_consecutive_samples: 1
+  source: timeline
+
+io_wait:
+  metric: io_wait_ratio
+  aggregation: ratio
+  reference: baseline
+  operator: gt
+  threshold: 1
   min_consecutive_samples: 1
   source: timeline

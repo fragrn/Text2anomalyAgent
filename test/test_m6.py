@@ -34,9 +34,9 @@ def test_registry_loads_deterministic_yaml_rules() -> None:
     assert qps_rule.threshold == 0.7
     assert registry.get("slow_query").aggregation == "delta"
     assert registry.get("slow_query").source == "snapshot"
-    assert registry.get("lock_contention").metric == "lock_waits"
-    assert registry.get("lock_contention_severe").metric == "lock_wait_time_ms"
-    assert registry.get("lock_contention_severe").threshold == 1000
+    assert registry.get("row_lock").metric == "row_lock_waits"
+    assert registry.get("row_lock_severe").metric == "row_lock_wait_time_ms"
+    assert registry.get("row_lock_severe").threshold == 1000
     assert registry.get("active_lock_wait").metric == "lock_waits_current"
 
 
@@ -96,12 +96,12 @@ def test_lock_wait_count_and_wait_time_severity_rules() -> None:
     timeline = ExperimentTimeline()
     timeline.mark(ExperimentPhase.INJECTION, name="injection_start")
     for waits, wait_time_ms in [(10, 200), (11, 1500), (14, 2500)]:
-        timeline.add_sample("lock_waits", waits, phase=ExperimentPhase.INJECTION)
-        timeline.add_sample("lock_wait_time_ms", wait_time_ms, phase=ExperimentPhase.INJECTION)
+        timeline.add_sample("row_lock_waits", waits, phase=ExperimentPhase.INJECTION)
+        timeline.add_sample("row_lock_wait_time_ms", wait_time_ms, phase=ExperimentPhase.INJECTION)
 
     engine = EvidenceEngine(registry)
-    contention = engine.evaluate_rule("lock_contention", timeline)
-    severe = engine.evaluate_rule("lock_contention_severe", timeline)
+    contention = engine.evaluate_rule("row_lock", timeline)
+    severe = engine.evaluate_rule("row_lock_severe", timeline)
 
     assert contention.hit is True
     assert severe.hit is True
@@ -112,16 +112,16 @@ def test_snapshot_lock_wait_delta_and_severity_boundaries() -> None:
     engine = EvidenceEngine(EvidenceRuleRegistry.from_yaml("config/evidence_rules.yaml"))
     pre = EvidenceSnapshot(
         boundary=SnapshotBoundary.PRE_INJECTION,
-        metrics={"lock_waits": 100.0, "lock_wait_time_ms": 3000.0},
+        metrics={"row_lock_waits": 100.0, "row_lock_wait_time_ms": 3000.0},
     )
     post = EvidenceSnapshot(
         boundary=SnapshotBoundary.POST_ACTION,
-        metrics={"lock_waits": 102.0, "lock_wait_time_ms": 4000.0},
+        metrics={"row_lock_waits": 102.0, "row_lock_wait_time_ms": 4000.0},
     )
     pair = EvidenceSnapshotPair(pre_injection=pre, post_action=post)
 
-    contention = engine.evaluate_snapshot_rule("lock_contention", pair)
-    severe = engine.evaluate_snapshot_rule("lock_contention_severe", pair)
+    contention = engine.evaluate_snapshot_rule("row_lock", pair)
+    severe = engine.evaluate_snapshot_rule("row_lock_severe", pair)
 
     assert contention.hit is True
     assert contention.comparison_value == 2.0
@@ -129,19 +129,19 @@ def test_snapshot_lock_wait_delta_and_severity_boundaries() -> None:
     assert severe.comparison_value == 1000.0
 
     no_new_wait = pair.model_copy(update={
-        "post_action": post.model_copy(update={"metrics": {"lock_waits": 100.0, "lock_wait_time_ms": 3999.0}})
+        "post_action": post.model_copy(update={"metrics": {"row_lock_waits": 100.0, "row_lock_wait_time_ms": 3999.0}})
     })
-    assert engine.evaluate_snapshot_rule("lock_contention", no_new_wait).hit is False
-    assert engine.evaluate_snapshot_rule("lock_contention_severe", no_new_wait).hit is False
+    assert engine.evaluate_snapshot_rule("row_lock", no_new_wait).hit is False
+    assert engine.evaluate_snapshot_rule("row_lock_severe", no_new_wait).hit is False
 
 
 def test_snapshot_missing_metric_is_not_a_hit() -> None:
     engine = EvidenceEngine(EvidenceRuleRegistry.from_yaml("config/evidence_rules.yaml"))
     pair = EvidenceSnapshotPair(
-        pre_injection=EvidenceSnapshot(boundary=SnapshotBoundary.PRE_INJECTION, metrics={"lock_waits": 1.0}),
+        pre_injection=EvidenceSnapshot(boundary=SnapshotBoundary.PRE_INJECTION, metrics={"row_lock_waits": 1.0}),
         post_action=EvidenceSnapshot(boundary=SnapshotBoundary.POST_ACTION, metrics={}),
     )
-    result = engine.evaluate_snapshot_rule("lock_contention", pair)
+    result = engine.evaluate_snapshot_rule("row_lock", pair)
     assert result.status == EvidenceStatus.MISSING
     assert result.hit is False
 

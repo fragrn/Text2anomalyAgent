@@ -22,10 +22,16 @@ class SystemMetricsProvider:
 
             virtual_memory = psutil.virtual_memory()
             disk = psutil.disk_io_counters()
+            cpu_times = psutil.cpu_times()
             metrics = {
                 "cpu_percent": float(psutil.cpu_percent(interval=None)),
                 "memory_percent": float(virtual_memory.percent),
                 "memory_used_bytes": float(virtual_memory.used),
+                # macOS does not expose iowait on every host; keep the field
+                # explicit so IO evidence can distinguish zero from missing.
+                "io_wait_ratio": float(getattr(cpu_times, "iowait", 0.0))
+                / max(float(sum(cpu_times)), 1.0),
+                "disk_util": 0.0,
             }
             if disk is not None:
                 now = time.monotonic()
@@ -33,6 +39,10 @@ class SystemMetricsProvider:
                     elapsed = max(now - self._previous_at, 1e-9)
                     metrics["io_read_bytes_per_sec"] = max(0.0, disk.read_bytes - self._previous_disk.read_bytes) / elapsed
                     metrics["io_write_bytes_per_sec"] = max(0.0, disk.write_bytes - self._previous_disk.write_bytes) / elapsed
+                    busy_ms = getattr(disk, "busy_time", None)
+                    previous_busy_ms = getattr(self._previous_disk, "busy_time", None)
+                    if busy_ms is not None and previous_busy_ms is not None:
+                        metrics["disk_util"] = min(1.0, max(0.0, (busy_ms - previous_busy_ms) / (elapsed * 1000.0)))
                 else:
                     metrics["io_read_bytes_per_sec"] = 0.0
                     metrics["io_write_bytes_per_sec"] = 0.0
@@ -53,5 +63,7 @@ class SystemMetricsProvider:
             "memory_used_bytes": 0.0,
             "io_read_bytes_per_sec": 0.0,
             "io_write_bytes_per_sec": 0.0,
+            "io_wait_ratio": 0.0,
+            "disk_util": 0.0,
             "disk_free_bytes": float(disk.free),
         }

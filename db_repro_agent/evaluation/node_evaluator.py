@@ -47,8 +47,13 @@ def infer_node_hit(node_id: str, metrics: dict[str, float | str | bool]) -> bool
     name = node_id.lower()
     if name in {"connections_up", "threads_concurrency_up"}:
         return _number(values, "threads_connected_ratio") > 1.2 or _number(values, "threads_connected_delta") > 0
-    if name == "lock_contention":
-        return _number(values, "lock_waits_delta") > 0 or _number(values, "lock_waits_current") > 0
+    if name == "row_lock":
+        return (
+            _number(values, "row_lock_waits_delta") > 0
+            or _number(values, "row_lock_current_waits") > 0
+            or _number(values, "lock_waits_delta") > 0
+            or _number(values, "lock_waits_current") > 0
+        )
     if name == "slow_query":
         return _number(values, "slow_queries_delta") > 0 or _number(values, "slow_queries_total_delta") > 0
     if name == "qps_drop":
@@ -57,6 +62,8 @@ def infer_node_hit(node_id: str, metrics: dict[str, float | str | bool]) -> bool
         return _number(values, "query_duration_ms") >= 100
     if name in {"metadata_lock", "metadata_lock_wait"}:
         return _truthy(values.get("metadata_lock_evidence")) or _number(values, "metadata_lock_wait_count") > 0
+    if name == "table_blocking":
+        return _number(values, "table_blocking_wait_count") > 0 or _number(values, "table_blocking_current_count") > 0
     if name in {"missing_index", "poor_plan"}:
         return _number(values, "rows_examined_ratio") > 1 or _contains(values, "explain_access_type", "all") or _contains_any(values, "explain_extra", ("filesort", "temporary"))
     if name == "improper_sql":
