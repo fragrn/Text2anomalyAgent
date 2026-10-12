@@ -68,14 +68,31 @@ def infer_node_hit(node_id: str, metrics: dict[str, float | str | bool]) -> bool
         return _number(values, "rows_examined_ratio") > 1 or _contains(values, "explain_access_type", "all") or _contains_any(values, "explain_extra", ("filesort", "temporary"))
     if name == "improper_sql":
         return _number(values, "rows_examined_ratio") > 3 or _number(values, "p95_latency_ratio") > 1 or _number(values, "slow_query_delta") > 0
-    if name in {"large_temp_table", "temp_table_spill", "sort_hash_spill"}:
+    if name == "sort_hash_spill":
+        return _number(values, "created_tmp_disk_tables_delta") > 0 or _number(values, "sort_merge_passes_delta") > 0
+    if name in {"large_temp_table", "temp_table_spill"}:
         return _number(values, "created_tmp_disk_tables_delta") > 0 or _number(values, "sort_merge_passes_delta") > 0 or _number(values, "temp_table_ratio") > 1 or _number(values, "sort_merge_passes_ratio") > 1
     if name in {"resource_cpu", "resource_bottleneck_cpu"}:
         return _number(values, "cpu_usage_ratio") > 1 or _number(values, "load_average_1m") > 1 or _truthy(values.get("load_average_high"))
     if name in {"resource_io", "resource_bottleneck_io", "disk_saturation"}:
         return _number(values, "io_wait_ratio") > 1 or _number(values, "disk_util") >= 0.8
-    if name in {"resource_memory", "buffer_pool_pressure"}:
+    if name == "resource_memory":
         return _number(values, "memory_usage_ratio") > 1 or _number(values, "buffer_pool_read_ratio") > 1 or _number(values, "innodb_buffer_pool_reads_delta") > 0
+    if name == "buffer_pool_pressure":
+        miss_ratio = _number(values, "buffer_pool_miss_ratio")
+        baseline_miss_ratio = _number(values, "buffer_pool_baseline_miss_ratio")
+        physical_reads = _number(values, "buffer_pool_physical_reads_per_sec")
+        baseline_physical_reads = _number(values, "buffer_pool_baseline_physical_reads_per_sec")
+        return (
+            _truthy(values.get("buffer_pool_miss_ratio_valid"))
+            and _truthy(values.get("buffer_pool_baseline_miss_ratio_valid"))
+            and _truthy(values.get("buffer_pool_physical_reads_valid"))
+            and _truthy(values.get("buffer_pool_baseline_physical_reads_valid"))
+            and miss_ratio >= 0.05
+            and miss_ratio >= baseline_miss_ratio * 2
+            and physical_reads >= 1
+            and physical_reads >= baseline_physical_reads * 2
+        )
     if name in {"redo_log_pressure", "redo_log_flush_stall", "commit_latency_up"}:
         return _number(values, "innodb_log_waits_delta") > 0 or _number(values, "write_latency_ratio") > 1 or _number(values, "tps_ratio") < 1
     if name == "write_throughput_drop":

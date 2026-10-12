@@ -24,9 +24,11 @@ from db_repro_agent.evaluation.node_evaluator import NodeObservation
 from db_repro_agent.config import ExperimentProfile, load_experiment_profile
 from db_repro_agent.execution.dispatcher import ActionDispatcher
 from db_repro_agent.metrics.collector import MetricsCollector
+from db_repro_agent.metrics.buffer_pool import summarize_buffer_pool_window
 from db_repro_agent.metrics.mysql_metrics import MySQLMetricsProvider
 from db_repro_agent.metrics.sampler import MetricsSampler
 from db_repro_agent.metrics.system_metrics import SystemMetricsProvider
+from db_repro_agent.metrics.timeline import ExperimentPhase
 from db_repro_agent.models.action import BenchBaseAction, ChaosBladeAction, SQLAction, TransactionAction, TransactionActor, TransactionStep
 from db_repro_agent.models.anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
 from db_repro_agent.reproduction.injection_actions import build_backup_action, build_missing_index_action, build_redo_log_pressure_action
@@ -87,9 +89,9 @@ def _sql_root(case: ChainCase, database: str):
     if case.root_node == "hot_update":
         return SQLAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, sql="UPDATE warehouse SET w_ytd = w_ytd + 0.01 WHERE w_id = 1", concurrency=3, execution_mode="concurrent", duration_sec=10, timeout_sec=30)
     if case.root_node == "improper_sql":
-        return SQLAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, sql="SELECT s_i_id, COUNT(*) FROM stock GROUP BY s_i_id ORDER BY COUNT(*) DESC", duration_sec=10, timeout_sec=30)
+        return SQLAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, sql="SELECT SQL_BIG_RESULT s_i_id, COUNT(*) FROM stock GROUP BY s_i_id ORDER BY COUNT(*) DESC", duration_sec=10, timeout_sec=30)
     if case.root_node == "large_temp_table":
-        return SQLAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, sql="SELECT s_data, COUNT(*) FROM stock GROUP BY s_data ORDER BY COUNT(*) DESC", duration_sec=10, timeout_sec=30)
+        return SQLAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, sql="SELECT SQL_BIG_RESULT s_data, COUNT(*) FROM stock GROUP BY s_data ORDER BY COUNT(*) DESC", duration_sec=10, timeout_sec=30)
     if case.root_node == "long_tx":
         return TransactionAction(action_id=f"{case.case_id}-root", target_node=case.root_node, database=database, actors=[TransactionActor(actor_id="holder", role="holder", steps=[TransactionStep(sql="BEGIN"), TransactionStep(sql="SELECT w_id FROM warehouse WHERE w_id=1 FOR UPDATE", delay_after_sec=10), TransactionStep(sql="ROLLBACK")])], duration_sec=15, timeout_sec=30)
     if case.root_node == "metadata_lock":
@@ -144,6 +146,7 @@ def _observations(timeline, case: ChainCase, *, adapter: MySQLAdapter | None = N
     samples = timeline.samples
     baseline = [sample for sample in samples if sample.phase.value == "baseline"]
     active = [sample for sample in samples if sample.phase.value in {"injection", "observing", "recovery"}]
+    spill_active = [sample for sample in samples if sample.phase.value in {"injection", "observing"}]
 
     def values(name: str, source):
         return [sample.value for sample in source if sample.metric_name == name or sample.metric_name.endswith(f".{name}")]
@@ -161,8 +164,28 @@ def _observations(timeline, case: ChainCase, *, adapter: MySQLAdapter | None = N
         base = values(name, baseline)
         return (current[-1] - base[0]) if current and base else 0.0
 
+    def window_delta(name: str) -> float:
+        current = values(name, spill_active)
+        base = values(name, baseline)
+        return max(0.0, current[-1] - base[-1]) if current and base else 0.0
+
+    def window_increment_ratio(name: str) -> float:
+        active_delta = window_delta(name)
+        baseline_values = values(name, baseline)
+        baseline_delta = max(0.0, baseline_values[-1] - baseline_values[0]) if len(baseline_values) >= 2 else 0.0
+        return active_delta / baseline_delta if baseline_delta > 0 else 0.0
+
     def max_value(name: str, source) -> float:
         return max(values(name, source), default=0.0)
+
+    baseline_buffer_pool = summarize_buffer_pool_window(
+        samples,
+        {ExperimentPhase.BASELINE},
+    )
+    active_buffer_pool = summarize_buffer_pool_window(
+        samples,
+        {ExperimentPhase.INJECTION, ExperimentPhase.OBSERVING},
+    )
 
     def explain_metrics() -> dict[str, float | str | bool]:
         if adapter is None or action is None or not hasattr(action, "sql"):
@@ -192,16 +215,24 @@ def _observations(timeline, case: ChainCase, *, adapter: MySQLAdapter | None = N
             "metadata_lock_wait_count": max_value("metadata_lock_wait_count", active),
             "table_blocking_wait_count": max_value("table_blocking_wait_count", active),
             "table_blocking_current_count": max_value("table_blocking_current_count", active),
-            "created_tmp_disk_tables_delta": delta("created_tmp_disk_tables"),
-            "sort_merge_passes_delta": delta("sort_merge_passes"),
-            "temp_table_ratio": ratio("created_tmp_disk_tables"),
-            "sort_merge_passes_ratio": ratio("sort_merge_passes"),
+            "created_tmp_disk_tables_delta": window_delta("created_tmp_disk_tables"),
+            "sort_merge_passes_delta": window_delta("sort_merge_passes"),
+            "temp_table_ratio": window_increment_ratio("created_tmp_disk_tables"),
+            "sort_merge_passes_ratio": window_increment_ratio("sort_merge_passes"),
             "innodb_buffer_pool_reads_delta": delta("innodb_buffer_pool_reads"),
             "deadlock_delta": delta("innodb_deadlocks"),
             "io_wait_ratio": ratio("io_wait_ratio"),
             "disk_util": max_value("disk_util", active),
             "cpu_usage_ratio": ratio("cpu_percent"),
             "memory_usage_ratio": ratio("memory_percent"),
+            "buffer_pool_miss_ratio": active_buffer_pool["miss_ratio"],
+            "buffer_pool_miss_ratio_valid": active_buffer_pool["miss_ratio_valid"],
+            "buffer_pool_baseline_miss_ratio": baseline_buffer_pool["miss_ratio"],
+            "buffer_pool_baseline_miss_ratio_valid": baseline_buffer_pool["miss_ratio_valid"],
+            "buffer_pool_physical_reads_per_sec": active_buffer_pool["physical_reads_per_sec"],
+            "buffer_pool_baseline_physical_reads_per_sec": baseline_buffer_pool["physical_reads_per_sec"],
+            "buffer_pool_physical_reads_valid": active_buffer_pool["physical_reads_valid"],
+            "buffer_pool_baseline_physical_reads_valid": baseline_buffer_pool["physical_reads_valid"],
             "innodb_log_waits_delta": delta("innodb_log_waits"),
             "tps_ratio": ratio("tps"),
         }

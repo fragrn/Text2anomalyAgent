@@ -143,6 +143,8 @@ def test_mysql_provider_converts_counters_to_rates() -> None:
                 {"Variable_name": "Innodb_row_lock_current_waits", "Value": "2"},
                 {"Variable_name": "Innodb_row_lock_waits", "Value": "12"},
                 {"Variable_name": "Innodb_row_lock_time", "Value": "3500"},
+                {"Variable_name": "Innodb_buffer_pool_reads", "Value": "7"},
+                {"Variable_name": "Innodb_buffer_pool_read_requests", "Value": "1000"},
                 {"Variable_name": "Slow_queries", "Value": "7"},
                 {"Variable_name": "Innodb_log_waits", "Value": "4"},
                 {"Variable_name": "Innodb_os_log_pending_fsyncs", "Value": "0"},
@@ -163,6 +165,8 @@ def test_mysql_provider_converts_counters_to_rates() -> None:
     assert second["lock_waits"] == 12
     assert second["lock_waits_current"] == 2
     assert second["lock_wait_time_ms"] == 3500
+    assert second["innodb_buffer_pool_reads"] == 7
+    assert second["innodb_buffer_pool_read_requests"] == 1000
 
 
 def _live_adapter_or_skip() -> MySQLAdapter:
