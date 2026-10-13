@@ -81,7 +81,11 @@ class BenchBaseAction(ActionBase):
     benchmark: str = Field(min_length=1)
     database: str = Field(min_length=1)
     terminals: int = Field(ge=1, le=100000)
-    rate: int | None = Field(default=None, ge=1)
+    rate: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional request rate; omit when unlimited, otherwise at least 1.",
+    )
     duration_sec: int = Field(ge=1, le=86400)
     transaction_weights: dict[str, int] = Field(default_factory=dict)
     config_path: str = Field(min_length=1)

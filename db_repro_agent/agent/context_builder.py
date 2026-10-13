@@ -18,6 +18,9 @@ class ActionGenerationContext(BaseModel):
     data_scale: dict[str, Any] = Field(default_factory=dict)
     runtime_snapshot: dict[str, Any] = Field(default_factory=dict)
     workload_status: dict[str, Any] = Field(default_factory=dict)
+    propagation_chain: list[str] = Field(default_factory=list)
+    active_injection_nodes: list[str] = Field(default_factory=list)
+    observed_downstream_nodes: list[str] = Field(default_factory=list)
     duration_budget_seconds: float = Field(gt=0)
     safety_constraints: dict[str, Any] = Field(default_factory=dict)
     previous_reflection: dict[str, Any] | None = None
@@ -37,6 +40,9 @@ class ContextBuilder:
         data_scale: dict[str, Any] | None = None,
         runtime_snapshot: dict[str, Any] | None = None,
         workload_status: dict[str, Any] | None = None,
+        propagation_chain: list[str] | None = None,
+        active_injection_nodes: list[str] | None = None,
+        observed_downstream_nodes: list[str] | None = None,
         duration_budget_seconds: float,
         safety_constraints: dict[str, Any] | None = None,
         previous_reflection: dict[str, Any] | None = None,
@@ -50,6 +56,9 @@ class ContextBuilder:
             data_scale=data_scale or {},
             runtime_snapshot=runtime_snapshot or {},
             workload_status=workload_status or {},
+            propagation_chain=propagation_chain or [],
+            active_injection_nodes=active_injection_nodes or [],
+            observed_downstream_nodes=observed_downstream_nodes or [],
             duration_budget_seconds=duration_budget_seconds,
             safety_constraints=safety_constraints or {},
             previous_reflection=previous_reflection,

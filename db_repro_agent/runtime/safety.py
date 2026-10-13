@@ -18,12 +18,10 @@ class SafetyChecker:
         target_database: str,
         allowed_command_roots: Iterable[str | Path] = (),
         max_duration_sec: int = 300,
-        max_cpu_percent: int = 80,
     ) -> None:
         self.target_database = target_database
         self.allowed_command_roots = tuple(Path(root).expanduser().resolve() for root in allowed_command_roots)
         self.max_duration_sec = max_duration_sec
-        self.max_cpu_percent = max_cpu_percent
 
     def check(self, action: ActionBase) -> ValidationResult:
         issues: list[ValidationIssue] = []
@@ -72,14 +70,6 @@ class SafetyChecker:
         }
         if tuple(tokens[:2]) not in allowed[action.resource]:
             issues.append(ValidationIssue(code="COMMAND_NOT_WHITELISTED", field="command", message="ChaosBlade command is not in the resource whitelist"))
-        if "--cpu-percent" in tokens:
-            index = tokens.index("--cpu-percent")
-            try:
-                percent = int(tokens[index + 1])
-                if percent > self.max_cpu_percent or percent < 0:
-                    issues.append(ValidationIssue(code="RESOURCE_INTENSITY_OVER_LIMIT", field="command", message="CPU percent exceeds safety limit"))
-            except (IndexError, ValueError):
-                issues.append(ValidationIssue(code="INVALID_RESOURCE_INTENSITY", field="command", message="CPU percent must be an integer"))
         return issues
 
     def _path_allowed(self, path: Path) -> bool:

@@ -30,7 +30,8 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     model: str = ""
     api_mode: str = Field(default="responses", pattern="^(responses|chat_completions)$")
-    request_timeout_seconds: float = Field(default=60.0, gt=0)
+    request_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
+    max_retries: int = Field(default=0, ge=0, le=3)
 
 
 class BenchBaseConfig(BaseModel):
@@ -295,6 +296,8 @@ def _environment_overrides(env: dict[str, str]) -> dict[str, Any]:
         "OPENAI_API_KEY": ("llm", "api_key", str),
         "OPENAI_MODEL": ("llm", "model", str),
         "OPENAI_API_MODE": ("llm", "api_mode", str),
+        "OPENAI_REQUEST_TIMEOUT_SECONDS": ("llm", "request_timeout_seconds", float),
+        "OPENAI_MAX_RETRIES": ("llm", "max_retries", int),
         "DBMAGS_BENCHBASE_JAR": ("benchbase", "jar_path", str),
         "DBMAGS_ARTIFACT_ROOT": ("_root", "artifact_root", str),
         "DBMAGS_MAX_ATTEMPTS": ("agent", "max_attempts", int),

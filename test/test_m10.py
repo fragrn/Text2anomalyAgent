@@ -13,8 +13,11 @@ from db_repro_agent.agent.action_generator import (
     ActionGenerator,
     evaluate_batch,
 )
+from db_repro_agent.agent.chain_agent import ChainAgent
 from db_repro_agent.agent.context_builder import ContextBuilder
+from db_repro_agent.agent.contracts import ChainReproductionRequest, PostReproductionRequest
 from db_repro_agent.agent.llm_client import LLMClientError, OpenAICompatibleClient
+from db_repro_agent.agent.post_agent import PostAgent
 from db_repro_agent.config import LLMConfig, load_config
 from db_repro_agent.models.action import BenchBaseAction, SQLAction, TransactionAction
 from db_repro_agent.runtime.action_validator import ActionValidator
@@ -128,6 +131,46 @@ def test_invalid_structured_output_is_rejected() -> None:
 
     with pytest.raises(ActionGenerationError):
         ActionGenerator.parse({"action": {"type": "sql", "action_id": "bad", "target_node": "slow_query", "database": "tpcc10_test", "sql": "SELECT 1", "unexpected": True}})
+
+    with pytest.raises(ActionGenerationError):
+        ActionGenerator.parse(
+            {
+                "type": "benchbase",
+                "action_id": "invalid-rate",
+                "target_node": "traffic_surge",
+                "benchmark": "tpcc",
+                "database": "tpcc10_test",
+                "terminals": 4,
+                "rate": 0,
+                "duration_sec": 60,
+                "config_path": "config.xml",
+                "jar_path": "benchbase.jar",
+                "results_dir": "results",
+            }
+        )
+
+
+def test_benchbase_rate_may_be_omitted_or_positive() -> None:
+    base = {
+        "type": "benchbase",
+        "action_id": "traffic-rate",
+        "target_node": "traffic_surge",
+        "benchmark": "tpcc",
+        "database": "tpcc10_test",
+        "terminals": 4,
+        "duration_sec": 60,
+        "config_path": "config.xml",
+        "jar_path": "benchbase.jar",
+        "results_dir": "results",
+    }
+
+    omitted = ActionGenerator.parse(base)
+    positive = ActionGenerator.parse({**base, "rate": 1})
+
+    assert isinstance(omitted.action, BenchBaseAction)
+    assert omitted.action.rate is None
+    assert isinstance(positive.action, BenchBaseAction)
+    assert positive.action.rate == 1
 
 
 def test_generated_action_uses_existing_validator(tmp_path: Path) -> None:
@@ -285,3 +328,102 @@ def test_api_mode_can_be_selected_from_environment() -> None:
     )
 
     assert config.llm.api_mode == "chat_completions"
+
+
+def test_llm_timeout_defaults_are_bounded_and_logged(capsys) -> None:
+    config = LLMConfig(
+        base_url="https://relay.example/v1",
+        api_key="key",
+        model="gpt-5.6-terra",
+    )
+    sdk = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: None),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: None)),
+    )
+    with patch("db_repro_agent.agent.llm_client.OpenAI", return_value=sdk):
+        client = OpenAICompatibleClient(config)
+
+    assert client.timeout_seconds == 45.0
+    assert client.max_retries == 0
+    client._log_no_response("responses", TimeoutError("no response"))
+
+    assert "LLM API received no response" in capsys.readouterr().out
+
+
+def chain_request() -> ChainReproductionRequest:
+    return ChainReproductionRequest(
+        incident_id="chain-m10",
+        target_node="slow_query",
+        propagation_chain=["traffic_surge", "row_lock", "slow_query"],
+        database="tpcc10_test",
+        schema={"warehouse": {"columns": ["w_id", "w_ytd"]}},
+        indexes={"warehouse": ["PRIMARY(w_id)"]},
+        data_scale={"warehouse": 1000},
+        runtime_snapshot={"threads_running": 2},
+        workload_status={"benchmark": "tpcc", "alive": True},
+        active_injection_nodes=["traffic_surge"],
+        observed_downstream_nodes=["row_lock", "slow_query"],
+        duration_budget_seconds=15,
+        safety_constraints={"max_concurrency": 8},
+    )
+
+
+def test_chain_agent_passes_chain_and_environment_into_generation_context() -> None:
+    fake = FakeLLM(
+        {
+            "action": {
+                "type": "sql",
+                "action_id": "chain-action-1",
+                "target_node": "slow_query",
+                "database": "tpcc10_test",
+                "sql": "SELECT SLEEP(2)",
+            }
+        }
+    )
+    agent = ChainAgent(ActionGenerator(fake))
+
+    plan = agent.generate_action_plan(chain_request())
+
+    assert isinstance(plan.action, SQLAction)
+    generated_context = fake.contexts[0]
+    assert generated_context["propagation_chain"] == [
+        "traffic_surge",
+        "row_lock",
+        "slow_query",
+    ]
+    assert generated_context["active_injection_nodes"] == ["traffic_surge"]
+    assert generated_context["observed_downstream_nodes"] == ["row_lock", "slow_query"]
+    assert generated_context["schema"]["warehouse"]["columns"] == ["w_id", "w_ytd"]
+
+
+def test_chain_agent_validates_before_execution_and_returns_m10_result() -> None:
+    fake = FakeLLM(
+        {
+            "type": "sql",
+            "action_id": "chain-action-2",
+            "target_node": "slow_query",
+            "database": "tpcc10_test",
+            "sql": "SELECT SLEEP(2)",
+        }
+    )
+    agent = ChainAgent(ActionGenerator(fake))
+    result = agent.reproduce_chain(
+        chain_request(),
+        validator=ActionValidator(target_database="tpcc10_test"),
+        safety_checker=SafetyChecker(target_database="tpcc10_test"),
+    )
+
+    assert result.agent == "chain"
+    assert result.status == "action_generated"
+    assert result.validation is not None and result.validation.passed
+    assert result.action_plan is not None
+
+
+def test_post_agent_is_only_a_stable_m10_placeholder() -> None:
+    result = PostAgent().reproduce_post(
+        PostReproductionRequest(incident_id="post-m10", post="A DBA incident post")
+    )
+
+    assert result.agent == "post"
+    assert result.status == "not_implemented"
+    assert result.action_plan is None
