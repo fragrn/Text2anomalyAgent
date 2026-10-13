@@ -29,6 +29,7 @@ class LLMConfig(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = ""
+    api_mode: str = Field(default="responses", pattern="^(responses|chat_completions)$")
     request_timeout_seconds: float = Field(default=60.0, gt=0)
 
 
@@ -142,7 +143,10 @@ class AppConfig(BaseModel):
 def load_config(path: str | Path | None = None, *, environ: dict[str, str] | None = None) -> AppConfig:
     """Load YAML/JSON configuration, then apply DBMAGS_* environment overrides."""
 
-    env = environ if environ is not None else os.environ
+    # Explicit mappings are used by tests and callers that already resolved
+    # their environment. For normal execution, load the repository-local
+    # .env first and let real process variables take precedence.
+    env = environ if environ is not None else {**_read_dotenv(Path(".env")), **os.environ}
     raw: dict[str, Any] = {}
     if path is not None:
         config_path = Path(path)
@@ -168,6 +172,29 @@ def load_config(path: str | Path | None = None, *, environ: dict[str, str] | Non
             code=ErrorCode.CONFIGURATION,
             details={"errors": exc.errors()},
         ) from exc
+
+
+def _read_dotenv(path: Path) -> dict[str, str]:
+    """Read simple KEY=VALUE entries without exposing values in logs."""
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
 
 
 def load_experiment_profile(path: str | Path) -> ExperimentProfile:
@@ -267,6 +294,7 @@ def _environment_overrides(env: dict[str, str]) -> dict[str, Any]:
         "OPENAI_BASE_URL": ("llm", "base_url", str),
         "OPENAI_API_KEY": ("llm", "api_key", str),
         "OPENAI_MODEL": ("llm", "model", str),
+        "OPENAI_API_MODE": ("llm", "api_mode", str),
         "DBMAGS_BENCHBASE_JAR": ("benchbase", "jar_path", str),
         "DBMAGS_ARTIFACT_ROOT": ("_root", "artifact_root", str),
         "DBMAGS_MAX_ATTEMPTS": ("agent", "max_attempts", int),
