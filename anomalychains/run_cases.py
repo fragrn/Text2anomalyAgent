@@ -21,7 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from db_repro_agent.evaluation.node_evaluator import NodeObservation
-from db_repro_agent.config import ExperimentProfile, load_experiment_profile
+from db_repro_agent.agent.action_generator import ActionGenerator, ActionPlan
+from db_repro_agent.agent.chain_agent import ChainAgent
+from db_repro_agent.agent.contracts import ChainReproductionRequest
+from db_repro_agent.config import ExperimentProfile, load_config, load_experiment_profile
 from db_repro_agent.execution.dispatcher import ActionDispatcher
 from db_repro_agent.metrics.collector import MetricsCollector
 from db_repro_agent.metrics.buffer_pool import summarize_buffer_pool_window
@@ -31,10 +34,15 @@ from db_repro_agent.metrics.system_metrics import SystemMetricsProvider
 from db_repro_agent.metrics.timeline import ExperimentPhase
 from db_repro_agent.models.action import BenchBaseAction, ChaosBladeAction, SQLAction, TransactionAction, TransactionActor, TransactionStep
 from db_repro_agent.models.anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
+from db_repro_agent.models.reflection import AttemptOutcome
 from db_repro_agent.reproduction.injection_actions import build_backup_action, build_missing_index_action, build_redo_log_pressure_action
 from db_repro_agent.reproduction.propagation_runner import PropagationReproductionRequest, PropagationRunner
 from db_repro_agent.runtime.experiment_setup import MySQLInstrumentation
 from db_repro_agent.runtime.preflight import run_preflight
+from db_repro_agent.runtime.artifact_store import ArtifactStore
+from db_repro_agent.runtime.action_validator import ActionValidator
+from db_repro_agent.runtime.safety import SafetyChecker
+from db_repro_agent.tools.database.schema_probe import SchemaProbe
 from db_repro_agent.tools.database.mysql import MySQLAdapter, MySQLConfig
 
 from .cases import CASES, CASE_BY_ID, ChainCase
@@ -253,8 +261,191 @@ def _write_result(case: ChainCase, payload: dict[str, Any], output_root: Path) -
     return destination
 
 
-def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_root: Path) -> dict[str, Any]:
-    payload: dict[str, Any] = {"case_id": case.case_id, "chain": list(case.chain), "declared_status": case.status, "reason": case.reason, "started_at": time.time()}
+def _reflection_context(adapter: MySQLAdapter, case: ChainCase, config: MySQLConfig, profile: ExperimentProfile) -> dict[str, Any]:
+    schema_result = adapter.probe_schema(config.database)
+    schema = schema_result.data if schema_result.success else {}
+    indexes: dict[str, Any] = {}
+    for table in (schema.get("tables", []) if isinstance(schema, dict) else []):
+        table_name = table.get("table_name")
+        if table_name:
+            result = adapter.probe_indexes(config.database, table_name)
+            if result.success:
+                indexes[table_name] = result.data
+    rows_result = adapter.probe_row_counts(config.database)
+    runtime_result = adapter.probe_runtime()
+    return {
+        "schema": schema,
+        "indexes": indexes,
+        "data_scale": rows_result.data if rows_result.success else {},
+        "runtime_snapshot": runtime_result.data if runtime_result.success else {},
+        "workload_status": {
+            "runner": profile.workload.runner,
+            "benchmark": profile.workload.benchmark,
+            "terminals": profile.workload.terminals,
+            "rate": profile.workload.rate,
+            "duration_seconds": profile.workload.duration_seconds,
+        },
+        "safety_constraints": {
+            "max_action_duration_seconds": profile.agent_limits.max_action_duration_seconds,
+            "max_concurrency": profile.agent_limits.max_concurrency,
+            "allowed_injection_nodes": [case.root_node],
+        },
+    }
+
+
+def _action_metrics(action: Any, profile: ExperimentProfile) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "action_duration_sec": getattr(action, "duration_sec", 0),
+        "injection_window_seconds": profile.experiment.injection_seconds,
+    }
+    if hasattr(action, "concurrency"):
+        metrics["concurrency"] = action.concurrency
+    if hasattr(action, "terminals"):
+        metrics["terminals"] = action.terminals
+    if hasattr(action, "rate") and action.rate is not None:
+        metrics["rate"] = action.rate
+    actors = getattr(action, "actors", [])
+    delays = [step.delay_after_sec for actor in actors for step in actor.steps]
+    if delays:
+        metrics["holder_lock_seconds"] = max(delays)
+    if hasattr(action, "sql"):
+        metrics["query_duration_sec"] = getattr(action, "duration_sec", 0)
+    return metrics
+
+
+def _attempt_outcome(result, action: Any, profile: ExperimentProfile) -> AttemptOutcome:
+    graph = result.graph_evaluation
+    failed_node = graph.failed_node if graph else None
+    failed_edge = graph.failed_edge if graph else None
+    node_results = {
+        key: value.model_dump(mode="json") for key, value in (graph.node_results.items() if graph else [])
+    }
+    edge_results = [value.model_dump(mode="json") for value in (graph.edge_results if graph else [])]
+    action_result = result.root_action_result.model_dump(mode="json") if result.root_action_result else {"success": False}
+    metrics = _action_metrics(action, profile)
+    if failed_node and failed_node in node_results:
+        metrics.update(node_results[failed_node].get("metrics", {}))
+    return AttemptOutcome(
+        success=result.full_graph_success,
+        action_result=action_result,
+        metrics_summary=metrics,
+        node_results=node_results,
+        edge_results=edge_results,
+        failed_node=failed_node,
+        failed_edge=failed_edge,
+        environment={
+            "database": action.database if hasattr(action, "database") else None,
+            "workload": profile.workload.model_dump(mode="json"),
+            "cleanup_success": getattr(result, "cleanup_success", None),
+            "background_alive_before_cleanup": getattr(result, "background_alive_before_cleanup", None),
+        },
+    )
+
+
+def _run_reflection_case(
+    case: ChainCase,
+    *,
+    adapter: MySQLAdapter,
+    config: MySQLConfig,
+    env: dict[str, str],
+    profile: ExperimentProfile,
+    output_root: Path,
+    action_generator: ActionGenerator,
+    max_retry_rounds: int,
+) -> dict[str, Any]:
+    context = _reflection_context(adapter, case, config, profile)
+    request = ChainReproductionRequest(
+        incident_id=f"human-{case.case_id}",
+        target_node=case.root_node,
+        propagation_chain=list(case.chain),
+        database=config.database,
+        schema=context["schema"],
+        indexes=context["indexes"],
+        data_scale=context["data_scale"],
+        runtime_snapshot=context["runtime_snapshot"],
+        workload_status=context["workload_status"],
+        active_injection_nodes=[case.root_node],
+        observed_downstream_nodes=list(case.chain[1:]),
+        duration_budget_seconds=profile.experiment.injection_seconds,
+        safety_constraints=context["safety_constraints"],
+    )
+    chain_agent = ChainAgent(action_generator)
+    validator = ActionValidator(
+        target_database=config.database,
+        schema_provider=adapter,
+        allowed_target_nodes={case.root_node},
+        max_duration_sec=profile.agent_limits.max_action_duration_seconds,
+        max_concurrency=profile.agent_limits.max_concurrency,
+        allowed_path_roots=[output_root, REPO_ROOT],
+    )
+    safety = SafetyChecker(
+        target_database=config.database,
+        allowed_command_roots=[output_root, REPO_ROOT],
+        max_duration_sec=profile.agent_limits.max_action_duration_seconds,
+    )
+    artifact_store = ArtifactStore(output_root)
+
+    def attempt_runner(plan: ActionPlan, attempt: int) -> AttemptOutcome:
+        print(f"[REFLECTION][{case.case_id}][attempt={attempt}] action_generated type={plan.action.type} action_id={plan.action.action_id}", flush=True)
+        background = None if case.root_node == "traffic_surge" else _benchbase_action(case, config.database, env, output_root=output_root, profile=profile)
+        runner = PropagationRunner(
+            dispatcher=ActionDispatcher(adapter),
+            sampler=MetricsSampler(MetricsCollector({"mysql": MySQLMetricsProvider(adapter), "system": SystemMetricsProvider()}), interval_seconds=profile.experiment.sample_interval_seconds),
+        )
+        propagation_request = PropagationReproductionRequest(
+            incident_id=f"human-{case.case_id}-attempt-{attempt}",
+            graph=_graph(case),
+            root_action=plan.action,
+            background_workload=background,
+            baseline_seconds=profile.experiment.baseline_seconds,
+            observe_seconds=profile.experiment.observe_seconds or profile.experiment.injection_seconds,
+            recovery_seconds=profile.experiment.recovery_seconds,
+        )
+        result = runner.run(propagation_request, observation_provider=lambda timeline: _observations(timeline, case, adapter=adapter, action=plan.action))
+        print(f"[REFLECTION][{case.case_id}][attempt={attempt}] action_success={bool(result.root_action_result and result.root_action_result.success)} full_graph={result.full_graph_success} failed_node={result.graph_evaluation.failed_node if result.graph_evaluation else None} failed_edge={result.first_failed_edge}", flush=True)
+        return _attempt_outcome(result, plan.action, profile)
+
+    result = chain_agent.reproduce_chain_with_reflection(
+        request,
+        attempt_runner=attempt_runner,
+        validator=validator,
+        safety_checker=safety,
+        max_retry_rounds=max_retry_rounds,
+        artifact_store=artifact_store,
+        experiment=case.case_id,
+    )
+    for record in result.attempts:
+        print(
+            f"[REFLECTION][{case.case_id}][attempt={record.attempt}] "
+            f"validation={record.validation.decision.value} "
+            f"action_success={record.outcome.action_result.get('success')} "
+            f"failed_node={record.outcome.failed_node} failed_edge={record.outcome.failed_edge}",
+            flush=True,
+        )
+        if record.reflection is not None:
+            print(
+                f"[REFLECTION][{case.case_id}][attempt={record.attempt}] "
+                f"diagnosis={record.reflection.diagnosis} "
+                f"recommended_changes={record.reflection.recommended_changes}",
+                flush=True,
+            )
+        print(
+            f"[REFLECTION][{case.case_id}][attempt={record.attempt}] "
+            f"cleanup={record.outcome.environment.get('cleanup_success')}",
+            flush=True,
+        )
+    payload = {
+        "reflection_enabled": True,
+        "reflection_rounds": max_retry_rounds,
+        "attempt_count": len(result.attempts),
+        "final_status": "experiment_success" if result.success else "experiment_miss",
+        "result": result.model_dump(mode="json"),
+    }
+    return payload
+
+
+def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_root: Path, reflection: bool = False, reflection_rounds: int | None = None, action_generator: ActionGenerator | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"case_id": case.case_id, "chain": list(case.chain), "declared_status": case.status, "reason": case.reason, "started_at": time.time(), "reflection_enabled": reflection}
     profile = load_experiment_profile(PROFILE_PATH)
     payload["experiment_profile"] = str(PROFILE_PATH)
     if case.status == "skipped":
@@ -296,6 +487,12 @@ def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_roo
         instrumentation = MySQLInstrumentation(adapter)
         instrumentation_state = instrumentation.prepare(profile.instrumentation)
         try:
+            if reflection:
+                if action_generator is None:
+                    raise ValueError("reflection mode requires an ActionGenerator")
+                payload.update(_run_reflection_case(case, adapter=adapter, config=config, env=env, profile=profile, output_root=output_root, action_generator=action_generator, max_retry_rounds=reflection_rounds if reflection_rounds is not None else profile.agent_limits.max_retry_rounds))
+                _write_result(case, payload, output_root)
+                return payload
             action = _root_action(case, config.database, env, output_root, profile)
             collector = MetricsCollector({"mysql": MySQLMetricsProvider(adapter), "system": SystemMetricsProvider()})
             runner = PropagationRunner(dispatcher=ActionDispatcher(adapter), sampler=MetricsSampler(collector, interval_seconds=profile.experiment.sample_interval_seconds))
@@ -319,7 +516,13 @@ def main() -> int:
     selection.add_argument("--list", action="store_true")
     parser.add_argument("--run-real", action="store_true")
     parser.add_argument("--include-risky", action="store_true")
+    parser.add_argument("--reflection", action="store_true", help="enable ChainAgent LLM Action generation and Reflection retries")
+    parser.add_argument("--reflection-rounds", type=int, default=None, help="override profile agent_limits.max_retry_rounds")
     args = parser.parse_args()
+    if args.reflection and not args.run_real:
+        parser.error("--reflection requires --run-real")
+    if args.reflection_rounds is not None and args.reflection_rounds < 0:
+        parser.error("--reflection-rounds must be >= 0")
     if args.list:
         for case in CASES:
             print(f"{case.case_id}\t{case.status}\t{' -> '.join(case.chain)}")
@@ -328,7 +531,8 @@ def main() -> int:
         parser.error(f"unknown case: {args.case}")
     selected = CASES if args.all else [CASE_BY_ID[args.case]]
     output_root = OUTPUT_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-    results = [run_case(case, run_real=args.run_real, include_risky=args.include_risky, output_root=output_root) for case in selected]
+    action_generator = ActionGenerator.from_config(load_config().llm) if args.reflection else None
+    results = [run_case(case, run_real=args.run_real, include_risky=args.include_risky, output_root=output_root, reflection=args.reflection, reflection_rounds=args.reflection_rounds, action_generator=action_generator) for case in selected]
     summary = {"run_at": time.time(), "results": results}
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

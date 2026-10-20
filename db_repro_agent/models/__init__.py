@@ -39,6 +39,7 @@ from .evidence import (
 )
 from .experiment_state import ExperimentPhase, ExperimentState, StateTransition
 from .anomaly_graph import AnomalyEdge, AnomalyGraph, AnomalyNode
+from .reflection import AttemptOutcome, AttemptRecord, ReflectionContext, ReflectionResult, ReflectionRunResult
 
 __all__ = [
     "ExperimentId",
@@ -76,4 +77,9 @@ __all__ = [
     "AnomalyNode",
     "AnomalyEdge",
     "AnomalyGraph",
+    "AttemptOutcome",
+    "AttemptRecord",
+    "ReflectionContext",
+    "ReflectionResult",
+    "ReflectionRunResult",
 ]
