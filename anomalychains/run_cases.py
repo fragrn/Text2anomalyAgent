@@ -435,6 +435,7 @@ def _run_reflection_case(
             flush=True,
         )
     payload = {
+        "status": "experiment_success" if result.success else "experiment_miss",
         "reflection_enabled": True,
         "reflection_rounds": max_retry_rounds,
         "attempt_count": len(result.attempts),
@@ -473,7 +474,7 @@ def run_case(case: ChainCase, *, run_real: bool, include_risky: bool, output_roo
                 pass
         except OSError as exc:
             payload.update(status="environment_error", error_type=type(exc).__name__, error=str(exc))
-            _write_result(case, payload)
+            _write_result(case, payload, output_root)
             return payload
     try:
         config = _config(env)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Protocol
 
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
@@ -88,7 +89,9 @@ SafetyChecker rejects it."""
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self.timeout_seconds,
-            max_retries=self.max_retries,
+            # Retries are controlled here so connection diagnostics and the
+            # total retry budget are not multiplied by SDK-level retries.
+            max_retries=0,
         )
 
     def generate_action(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -113,11 +116,14 @@ SafetyChecker rejects it."""
 
     def _generate_responses(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = self.client.responses.create(
-                model=self.model,
-                instructions=self._SYSTEM_PROMPT,
-                input=json.dumps(context, ensure_ascii=False),
-                text={"format": {"type": "json_object"}},
+            response = self._request_with_retries(
+                "responses",
+                lambda: self.client.responses.create(
+                    model=self.model,
+                    instructions=self._SYSTEM_PROMPT,
+                    input=json.dumps(context, ensure_ascii=False),
+                    text={"format": {"type": "json_object"}},
+                ),
             )
         except (APITimeoutError, APIConnectionError):
             raise
@@ -128,14 +134,17 @@ SafetyChecker rejects it."""
 
     def _generate_chat(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                temperature=0,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": self._SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-                ],
+            response = self._request_with_retries(
+                "chat/completions",
+                lambda: self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": self._SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+                    ],
+                ),
             )
         except (APITimeoutError, APIConnectionError) as exc:
             self._log_no_response("chat/completions", exc)
@@ -149,6 +158,23 @@ SafetyChecker rejects it."""
         if not isinstance(content, str):
             raise LLMClientError("Chat message content must be a JSON string")
         return self._parse_json(content)
+
+    def _request_with_retries(self, endpoint: str, request):
+        """Retry only transport/timeouts with one bounded application budget."""
+        for attempt in range(self.max_retries + 1):
+            try:
+                return request()
+            except (APITimeoutError, APIConnectionError) as exc:
+                self._log_no_response(endpoint, exc)
+                if attempt >= self.max_retries:
+                    raise
+                delay = min(1.0, 0.25 * (attempt + 1))
+                print(
+                    f"[LLM_RETRY] endpoint={endpoint} retry={attempt + 1}/{self.max_retries} "
+                    f"delay_seconds={delay:g}",
+                    flush=True,
+                )
+                time.sleep(delay)
 
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any]:

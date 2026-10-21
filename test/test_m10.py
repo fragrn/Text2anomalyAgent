@@ -344,7 +344,7 @@ def test_llm_timeout_defaults_are_bounded_and_logged(capsys) -> None:
         client = OpenAICompatibleClient(config)
 
     assert client.timeout_seconds == 45.0
-    assert client.max_retries == 0
+    assert client.max_retries == 1
     client._log_no_response("responses", TimeoutError("no response"))
 
     assert "LLM API received no response" in capsys.readouterr().out

@@ -144,6 +144,7 @@ def test_reflection_mode_retries_with_fake_llm_and_runner(tmp_path, monkeypatch)
     )
 
     assert result["reflection_enabled"] is True
+    assert result["status"] == "experiment_success"
     assert result["attempt_count"] == 2
     assert result["final_status"] == "experiment_success"
     assert len(llm.calls) == 2

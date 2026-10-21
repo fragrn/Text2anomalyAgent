@@ -31,7 +31,7 @@ class LLMConfig(BaseModel):
     model: str = ""
     api_mode: str = Field(default="responses", pattern="^(responses|chat_completions)$")
     request_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
-    max_retries: int = Field(default=0, ge=0, le=3)
+    max_retries: int = Field(default=1, ge=0, le=3)
 
 
 class BenchBaseConfig(BaseModel):
